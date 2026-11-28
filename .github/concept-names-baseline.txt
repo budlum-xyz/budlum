@@ -5,7 +5,7 @@
 Anaç|0|0
 Atlas|6|49
 Budscan|0|0
-D-Web Passport|9|78
+D-Web Passport|10|80
 DeEd|12|31
 Developer OS|0|0
 Filiz (faucet)|1|14
@@ -21,11 +21,11 @@ Living Threshold|6|16
 Mikoriza|19|65
 Mobile Self|10|69
 PUL|12|98
-Pollen|62|725
+Pollen|64|728
 Regeneration|26|106
 Sera|0|0
-Tarif|51|1408
+Tarif|53|1425
 Universal Gateway|4|7
 Vault (SocialFi)|7|152
 budlumxyz|25|204
-three_* modules|29|192
+three_* modules|31|201

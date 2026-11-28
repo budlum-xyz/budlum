@@ -3486,7 +3486,7 @@ mod rpc_tests {
         assert_eq!(error.code(), code);
         let data = error.data().map(ToString::to_string).unwrap_or_default();
         assert!(
-            data.contains(&format!("\"reason\":\"{reason}\"")),
+            data.contains(&format!(""reason":"{reason}"")),
             "missing machine-readable {reason}: {data}"
         );
     }
@@ -5206,5 +5206,179 @@ mod rpc_tests {
                 .code(),
             -32004
         );
+    }
+
+    /// The Data Market's write side answers with an unsigned template.
+    ///
+    /// `SettlementTx::DataMarket` could create a listing and no door could
+    /// build one, so the market was readable from outside and not writable.
+    /// Both prepare doors have to return a template the caller signs, and both
+    /// have to refuse a malformed request with the parameter error a client
+    /// branches on.
+    #[tokio::test]
+    async fn data_market_prepare_doors_answer_a_template_and_refuse_junk() {
+        let (server, _chain) = setup().await;
+
+        let seller = test_address(0x11);
+        let digest = test_address(0x22);
+        let object_key = test_address(0x33);
+        let nft_id = test_address(0x44);
+        let listing_request = serde_json::json!({
+            "seller": seller,
+            "contentId": { "kind": "public", "digest": digest, "len": 4096 },
+            "objectKey": object_key,
+            "nftId": nft_id,
+            "priceAtoms": 1_000,
+            "grantDurationEpochs": 30
+        });
+
+        let listing = server
+            .data_market_prepare_listing(listing_request.clone())
+            .await
+            .expect("a well-formed listing request answers a template");
+        assert_eq!(listing["priceAtoms"], 1_000);
+        assert!(
+            listing["transaction"].is_object(),
+            "the template must carry the transaction to sign"
+        );
+
+        // A zero price is not a listing, and the door says so with -32602.
+        let mut free = listing_request;
+        free["priceAtoms"] = serde_json::json!(0);
+        let refused = server
+            .data_market_prepare_listing(free)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), -32602);
+
+        // A digest that is not 32 bytes is a malformed id, not a short one.
+        let short_digest = serde_json::json!({
+            "seller": seller,
+            "contentId": { "kind": "public", "digest": "0x00", "len": 1 },
+            "objectKey": object_key,
+            "nftId": nft_id,
+            "priceAtoms": 10,
+            "grantDurationEpochs": 30
+        });
+        let refused = server
+            .data_market_prepare_listing(short_digest)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), -32602);
+
+        // The purchase door: the grant must arrive sealed, because a bare
+        // content key must never travel in a request.
+        let listing_id = test_address(0x66);
+        let purchase_request = serde_json::json!({
+            "buyer": test_address(0x55),
+            "listingId": listing_id,
+            "contentId": { "kind": "public", "digest": digest, "len": 4096 },
+            "priceAtoms": 1_000,
+            "buyerMlDsa87Pk": test_address(0x77),
+            "buyerHpkePk": test_address(0x88),
+            "grantNonce": test_address(0x99),
+            "oneTimeMlDsa65Pk": test_address(0xaa),
+            "sealedKeyPackage": test_address(0xbb)
+        });
+        let purchase = server
+            .data_market_prepare_purchase(purchase_request.clone())
+            .await
+            .expect("a well-formed purchase request answers a template");
+        assert!(
+            purchase["buyerSigningDigest"].is_string(),
+            "the buyer must receive the digest it signs"
+        );
+
+        let mut unsealed = purchase_request;
+        unsealed["sealedKeyPackage"] = serde_json::json!("");
+        let refused = server
+            .data_market_prepare_purchase(unsealed)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), -32602);
+
+        // An empty request names the first missing field rather than panicking.
+        let empty = serde_json::json!({});
+        let refused = server.data_market_prepare_purchase(empty).await.unwrap_err();
+        assert_eq!(refused.code(), -32602);
+    }
+
+    /// The B.U.D. 3.0 upload doors: a session opens for a declared length and
+    /// chunks append to it, and both refuse a request that could only be a
+    /// mistake rather than starting a session nobody can finish.
+    #[tokio::test]
+    async fn storage_upload_doors_open_a_session_and_refuse_junk() {
+        let (server, _chain) = setup().await;
+
+        let account = test_address(0x21);
+        let open_request = serde_json::json!({
+            "account": account,
+            "declared_len": 1_024,
+            "lifetime_epochs": 100
+        });
+        let opened = server
+            .storage_upload_open(open_request)
+            .await
+            .expect("a well-formed open request answers a session");
+        let session_id = opened["session_id"]
+            .as_u64()
+            .expect("the open door answers a numeric session id");
+
+        let append_request = serde_json::json!({
+            "session_id": session_id,
+            "chunk_hex": "0xdeadbeef"
+        });
+        let appended = server
+            .storage_upload_append(append_request)
+            .await
+            .expect("a chunk that fits the declared length is accepted");
+        assert_eq!(appended["received_len"], 4);
+
+        // An account that is not 32 bytes cannot own a bucket, so the open
+        // door refuses rather than deriving one from a short key.
+        let short_account = serde_json::json!({ "account": "0x00", "declared_len": 1_024 });
+        let refused = server.storage_upload_open(short_account).await.unwrap_err();
+        assert_eq!(refused.code(), -32602);
+
+        // A session that was never opened cannot be appended to.
+        let unknown_session = serde_json::json!({
+            "session_id": 9_999,
+            "chunk_hex": "0x00"
+        });
+        let refused = server
+            .storage_upload_append(unknown_session)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), -32000);
+
+        // A chunk that is not hex is a malformed request, not a bad session.
+        let bad_hex = serde_json::json!({
+            "session_id": session_id,
+            "chunk_hex": "not-hex"
+        });
+        let refused = server.storage_upload_append(bad_hex).await.unwrap_err();
+        assert_eq!(refused.code(), -32602);
+    }
+
+    /// `bud_dataMarketGetListing` answers null rather than an error for an
+    /// unknown id, so a client can tell "no such listing" from "refused to
+    /// look", the same way `bud_identity_resolve` answers for an absent DID.
+    #[tokio::test]
+    async fn data_market_listing_reader_answers_null_and_refuses_malformed() {
+        let (server, _chain) = setup().await;
+
+        let absent_id = test_address(0xab);
+        let absent = server
+            .data_market_listing(absent_id)
+            .await
+            .expect("an unknown listing id is a question, not an error");
+        assert!(
+            absent.is_null(),
+            "an unknown listing reads as absent: {absent}"
+        );
+
+        let malformed_id = String::from("not-hex");
+        let malformed = server.data_market_listing(malformed_id).await.unwrap_err();
+        assert_eq!(malformed.code(), -32602);
     }
 }

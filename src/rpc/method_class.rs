@@ -241,6 +241,7 @@ pub(crate) const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_marketPrepareOffer", Public, TxSubmit),
     row("bud_marketPreparePurchase", Public, TxSubmit),
     row("bud_dataMarketGetDataAssets", Public, Read),
+    row("bud_dataMarketGetListing", Public, Read),
     row("bud_dataMarketGetAccessGrants", Public, Read),
     row("bud_dataMarketGetSaleAuthorizations", Public, Read),
     row("bud_dataMarketGetPurchaseReceipts", Public, Read),
