@@ -5043,7 +5043,14 @@ impl AccountState {
         let roots: std::collections::BTreeMap<u32, ([u8; 32], u64)> = self
             .external_roots
             .iter()
-            .map(|(domain, root)| (*domain, (*root, 0u64)))
+            .map(|(domain, root)| {
+                let height = self
+                    .settlement
+                    .domains
+                    .get(*domain)
+                    .map_or(0u64, |d| d.last_committed_height);
+                (*domain, (*root, height))
+            })
             .collect();
         crate::settlement::unified_balance::unified_balance(
             &self.settlement.denominations,

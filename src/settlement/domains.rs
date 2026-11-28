@@ -1939,6 +1939,11 @@ pub fn execute_settlement_tx(
                 )));
             }
             let balance = state.spendable_balance(&ctx.sender);
+            if domain.operator_bond == 0 {
+                return Err(SettlementTxError::Refused(
+                    "a zero bond escrows nothing".into(),
+                ));
+            }
             let needed = domain.operator_bond.checked_add(ctx.fee).ok_or_else(|| {
                 SettlementTxError::Refused("domain bond plus fee overflows".into())
             })?;
@@ -2082,31 +2087,87 @@ fn execute_denomination(
         )));
     }
 
-    // The claim domain test: a member on a domain this chain cannot carry has
-    // a balance that could never be proven, so admitting it would be a
-    // permanent hole in every sum the asset enters.
+    if crate::aggregation::chain::claim_domain(ctx.chain_id).is_none() {
+        return Err(SettlementTxError::Refused(String::from(
+            "denomination: chain has no settlement claim domain",
+        )));
+    }
+
+    if denomination.anchor_root == [0u8; 32] {
+        return Err(SettlementTxError::Refused(String::from(
+            "denomination: anchor root must be non-zero",
+        )));
+    }
+
+    // Require every member domain to be active, unrefuted, anchored in
+    // `external_roots`, and operated by `ctx.sender` (preventing arbitrary
+    // global `(domain, native_id)` namespace squatting), while requiring
+    // `denomination.anchor_root` to match at least one member domain's accepted
+    // state root so multi-chain denominations with distinct chain roots work.
+    let mut matched_anchor = false;
+    for member in &denomination.members {
+        let dom = state.settlement.domains.get(member.domain).ok_or_else(|| {
+            SettlementTxError::Refused(format!(
+                "denomination: member domain {} is not registered",
+                member.domain
+            ))
+        })?;
+        if !dom.is_active() {
+            return Err(SettlementTxError::Refused(format!(
+                "denomination: member domain {} is inactive",
+                member.domain
+            )));
+        }
+        if dom.operator != Some(ctx.sender) {
+            return Err(SettlementTxError::Refused(format!(
+                "denomination: only the operator of domain {} may register its native assets",
+                member.domain
+            )));
+        }
+        crate::settlement::finality_gate::enforce_domain_not_refuted(
+            &state.settlement,
+            state.current_block_height,
+            crate::settlement::finality_gate::ValueGate::UniversalPayment,
+            member.domain,
+        )
+        .map_err(|e| SettlementTxError::Refused(format!("denomination: {e}")))?;
+        crate::settlement::finality_gate::enforce_sentry_circuit_clear(
+            &state.bridge_state.consensus_sentry,
+            crate::settlement::finality_gate::ValueGate::UniversalPayment,
+            member.domain,
+        )
+        .map_err(|e| SettlementTxError::Refused(format!("denomination: {e}")))?;
+        let accepted_root = state.external_roots.get(&member.domain).ok_or_else(|| {
+            SettlementTxError::Refused(format!(
+                "denomination: domain {} has no accepted finalized state root",
+                member.domain
+            ))
+        })?;
+        if *accepted_root == [0u8; 32] {
+            return Err(SettlementTxError::Refused(format!(
+                "denomination: domain {} has a zero external root",
+                member.domain
+            )));
+        }
+        if *accepted_root == denomination.anchor_root {
+            matched_anchor = true;
+        }
+    }
+
+    if !matched_anchor {
+        return Err(SettlementTxError::Refused(String::from(
+            "denomination: anchor root is not an accepted root of any member domain",
+        )));
+    }
+
     let has_claim_domain = |domain: u32| {
         crate::aggregation::chain::claim_domain(ctx.chain_id).is_some()
             && state
                 .settlement
                 .domains
-                .domains()
-                .iter()
-                .any(|d| d.id == domain)
+                .get(domain)
+                .is_some_and(ConsensusDomain::is_active)
     };
-
-    // Every member's anchor root must be the root this chain accepted for that
-    // domain, exactly as the liquidation door checks its claimed roots. Without
-    // this, an issuer could declare a denomination against a root it invented,
-    // and the "proof" behind the asset would be a number the issuer picked.
-    for member in &denomination.members {
-        if state.external_roots.get(&member.domain) != Some(&denomination.anchor_root) {
-            return Err(SettlementTxError::Refused(format!(
-                "denomination: anchor root is not the accepted root of domain {}",
-                member.domain
-            )));
-        }
-    }
 
     state
         .settlement
@@ -2135,6 +2196,73 @@ pub enum BundleTx {
         /// The bundle to close.
         bundle_id: [u8; 32],
     },
+}
+
+/// Maximum active bundles retained simultaneously in consensus state.
+const MAX_BUNDLES: usize = 4_096;
+
+/// Cancels open, unsettled legs of an expiring or closed bundle and refunds
+/// their escrow atomically per owner.
+fn cancel_unsettled_bundle_legs(
+    state: &mut AccountState,
+    bundle: &crate::relayer::bundle::IntentBundle,
+    current_block: u64,
+) -> Result<(), SettlementTxError> {
+    // Compute total refundable escrow per owner first so an overflow aborts
+    // cleanly before mutating relayer_policy or account balances.
+    let mut leg_refunds: Vec<([u8; 32], Address, u64)> = Vec::new();
+    let mut per_owner_refunds: std::collections::BTreeMap<Address, u64> =
+        std::collections::BTreeMap::new();
+    for leg in &bundle.legs {
+        if state
+            .settlement
+            .relayer_policy
+            .settled_intents
+            .contains(&leg.intent_id)
+        {
+            continue;
+        }
+        if let Some(open) = state.settlement.relayer_policy.intents.get(&leg.intent_id) {
+            let escrow = state
+                .settlement
+                .relayer_policy
+                .escrowed_amount(&leg.intent_id);
+            let entry = per_owner_refunds.entry(open.owner).or_insert(0);
+            *entry = entry.checked_add(escrow).ok_or_else(|| {
+                SettlementTxError::Refused(String::from("bundle: refund sum overflows u64"))
+            })?;
+            leg_refunds.push((leg.intent_id, open.owner, escrow));
+        }
+    }
+    for (owner, owner_total) in per_owner_refunds {
+        if state.get_balance(&owner).checked_add(owner_total).is_none() {
+            return Err(SettlementTxError::Refused(String::from(
+                "bundle: refund credit would overflow owner balance",
+            )));
+        }
+    }
+    for (intent_id, owner, escrow) in leg_refunds {
+        let registry = &mut state.settlement.relayer_policy;
+        registry.escrowed.remove(&intent_id);
+        registry.awards.remove(&intent_id);
+        registry.bids.remove(&intent_id);
+        registry.intents.remove(&intent_id);
+        registry.settled_intents.remove(&intent_id);
+        let row = crate::relayer::IntentSettlement {
+            intent_id,
+            relayer: Address::zero(),
+            paid_fee: 0,
+            settled_at_block: current_block,
+            status: crate::relayer::IntentSettlementStatus::Expired,
+        };
+        registry.settlements.insert(intent_id, row);
+        if escrow > 0 {
+            state
+                .try_add_balance(&owner, escrow)
+                .map_err(SettlementTxError::Refused)?;
+        }
+    }
+    Ok(())
 }
 
 /// Executes a bundle transaction.
@@ -2170,11 +2298,25 @@ fn execute_bundle_tx(
                     "bundle: already registered",
                 )));
             }
+            if state.settlement.bundles.len() >= MAX_BUNDLES {
+                return Err(SettlementTxError::Refused(String::from(
+                    "bundle: maximum active bundle capacity reached",
+                )));
+            }
+            if !bundle.budget_covers_fees() {
+                return Err(SettlementTxError::Refused(String::from(
+                    "bundle: leg fees exceed bundle max_total_fee",
+                )));
+            }
+            if bundle.deadline_block <= state.current_block_height {
+                return Err(SettlementTxError::Refused(String::from(
+                    "bundle: deadline has already passed",
+                )));
+            }
 
-            // Every leg must be an open intent owned by the sender. This is
-            // what stops a bundle from naming somebody else's intent, or an
-            // intent that was never opened, to conjure an escrow that does not
-            // exist.
+            // Every leg must be an open, unsettled, unexpired intent owned by
+            // the sender, match the open intent record verbatim, and not
+            // already belong to another open bundle.
             for (index, leg) in bundle.legs.iter().enumerate() {
                 let open = state
                     .settlement
@@ -2189,6 +2331,42 @@ fn execute_bundle_tx(
                         "bundle: leg {index} is owned by another account"
                     )));
                 }
+                if state
+                    .settlement
+                    .relayer_policy
+                    .settled_intents
+                    .contains(&leg.intent_id)
+                    || state
+                        .settlement
+                        .relayer_policy
+                        .settlements
+                        .contains_key(&leg.intent_id)
+                {
+                    return Err(SettlementTxError::Refused(format!(
+                        "bundle: leg {index} is already settled"
+                    )));
+                }
+                if open.deadline_block <= state.current_block_height {
+                    return Err(SettlementTxError::Refused(format!(
+                        "bundle: leg {index} has already expired"
+                    )));
+                }
+                if leg != open {
+                    return Err(SettlementTxError::Refused(format!(
+                        "bundle: leg {index} does not match open intent"
+                    )));
+                }
+                if let Some(existing_id) = state.settlement.bundles.iter().find_map(|(id, b)| {
+                    b.legs
+                        .iter()
+                        .any(|bound| bound.intent_id == leg.intent_id)
+                        .then_some(id)
+                }) {
+                    return Err(SettlementTxError::Refused(format!(
+                        "bundle: leg {index} is already bound in bundle {}",
+                        hex::encode(existing_id)
+                    )));
+                }
             }
 
             state
@@ -2198,13 +2376,37 @@ fn execute_bundle_tx(
             Ok(())
         }
         BundleTx::Close { bundle_id } => {
-            let bundle = state.settlement.bundles.get(bundle_id).ok_or_else(|| {
-                SettlementTxError::Refused(String::from("bundle: not registered"))
-            })?;
+            let bundle = state
+                .settlement
+                .bundles
+                .get(bundle_id)
+                .cloned()
+                .ok_or_else(|| {
+                    SettlementTxError::Refused(String::from("bundle: not registered"))
+                })?;
             if bundle.owner != ctx.sender {
                 return Err(SettlementTxError::Refused(String::from(
                     "bundle: only the owner may close a bundle",
                 )));
+            }
+            let settled_count = bundle
+                .legs
+                .iter()
+                .filter(|leg| {
+                    state
+                        .settlement
+                        .relayer_policy
+                        .settled_intents
+                        .contains(&leg.intent_id)
+                })
+                .count();
+            if settled_count > 0 && settled_count < bundle.legs.len() {
+                return Err(SettlementTxError::Refused(String::from(
+                    "bundle: cannot close mid-flight after partial leg settlement; wait for sweep/expiry",
+                )));
+            }
+            if settled_count == 0 {
+                cancel_unsettled_bundle_legs(state, &bundle, state.current_block_height)?;
             }
             state.settlement.bundles.remove(bundle_id);
             Ok(())
@@ -2235,15 +2437,17 @@ pub fn sweep_bundles(state: &mut AccountState, current_block: u64) -> (usize, us
         let Some(bundle) = state.settlement.bundles.get(&id).cloned() else {
             continue;
         };
+        let bundle_expired = bundle.deadline_block <= current_block;
         let registry = &state.settlement.relayer_policy;
         let status = bundle_status(
             &bundle,
             |leg| registry.settled_intents.contains(leg),
             |leg| {
-                registry
-                    .intents
-                    .get(leg)
-                    .is_some_and(|intent| intent.deadline_block <= current_block)
+                bundle_expired
+                    || registry
+                        .intents
+                        .get(leg)
+                        .is_some_and(|intent| intent.deadline_block <= current_block)
             },
         );
         match status {
@@ -2253,8 +2457,10 @@ pub fn sweep_bundles(state: &mut AccountState, current_block: u64) -> (usize, us
                 completed += 1;
             }
             BundleStatus::Refund => {
-                state.settlement.bundles.remove(&id);
-                refunded += 1;
+                if cancel_unsettled_bundle_legs(state, &bundle, current_block).is_ok() {
+                    state.settlement.bundles.remove(&id);
+                    refunded += 1;
+                }
             }
         }
     }
@@ -2717,6 +2923,14 @@ pub(crate) fn execute_relayer_intent_tx(
             paid_fee,
             result,
         } => {
+            if state.settlement.bundles.values().any(|b| {
+                b.deadline_block <= state.current_block_height
+                    && b.legs.iter().any(|l| &l.intent_id == intent_id)
+            }) {
+                return Err(SettlementTxError::Refused(String::from(
+                    "bundle: leg belongs to an expired bundle",
+                )));
+            }
             let registry = &state.settlement.relayer_policy;
             let intent = registry
                 .intents
@@ -3953,6 +4167,133 @@ mod tests {
             funded.external_bond_escrow.get(&op).copied(),
             Some(MIN_DOMAIN_OPERATOR_BOND)
         );
+
+        let mut zero_bond = pow(102);
+        let op2 = operator(&zero_bond);
+        zero_bond.operator_bond = 0;
+        let mut zero_state = AccountState::new();
+        zero_state.add_balance(&op2, FEE);
+        let zero_root_before = zero_state.settlement.root();
+        let err = execute_settlement_tx(
+            &mut zero_state,
+            &ctx(op2),
+            &SettlementTx::RegisterDomain(Box::new(zero_bond)),
+        )
+        .expect_err("a zero-bond RegisterDomain must be refused");
+        assert!(matches!(err, SettlementTxError::Refused(_)));
+        assert!(
+            zero_state.settlement.domains.get(102).is_none(),
+            "refused zero-bond RegisterDomain mutated settlement.domains"
+        );
+        assert_eq!(
+            zero_state.settlement.root(),
+            zero_root_before,
+            "refused zero-bond RegisterDomain mutated settlement root"
+        );
+    }
+
+    #[test]
+    fn bundle_open_refuses_intent_already_bound_in_another_bundle() {
+        use crate::relayer::bundle::IntentBundle;
+        use crate::relayer::policy::{RelayerActionKind, UserIntent};
+
+        let owner = Address::from([0x41; 32]);
+        let mut state = AccountState::new();
+        let policy = crate::relayer::PolicyEnvelope {
+            owner,
+            session_key: None,
+            spending_cap: 500,
+            allowed_domains: vec![1, 2, 3, 4],
+            requires_multisig: false,
+            requires_hsm: false,
+            expires_at_block: 1000,
+        };
+        let policy_hash = policy.policy_hash();
+
+        let make_leg = |src: u32, tgt: u32, hint: u8, fee: u64| {
+            UserIntent::new(
+                owner,
+                src,
+                tgt,
+                RelayerActionKind::ExternalTransaction {
+                    chain: crate::core::transaction::ExternalChain::Ethereum,
+                    target_address: format!("0x{hint:02x}"),
+                    payload_hash: [hint; 32],
+                },
+                fee,
+                500,
+                u64::from(hint),
+                policy_hash,
+                Address::from([0xB2; 32]),
+            )
+        };
+
+        let shared_leg = make_leg(1, 2, 0x10, 50);
+        let leg_b = make_leg(2, 3, 0x20, 50);
+        let leg_c = make_leg(3, 4, 0x30, 50);
+        for leg in [&shared_leg, &leg_b, &leg_c] {
+            state
+                .settlement
+                .relayer_policy
+                .submit_intent(leg.clone(), &policy, 0)
+                .expect("register open intent");
+        }
+
+        let first = IntentBundle::new(owner, vec![shared_leg.clone(), leg_b], 200, 400);
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::Bundle(Box::new(BundleTx::Open(Box::new(first)))),
+        )
+        .expect("first bundle opens cleanly");
+
+        let overlapping = IntentBundle::new(owner, vec![shared_leg, leg_c.clone()], 200, 400);
+        let err = execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::Bundle(Box::new(BundleTx::Open(Box::new(overlapping)))),
+        )
+        .expect_err("a second bundle reusing an already-bound intent must be refused");
+        assert!(matches!(err, SettlementTxError::Refused(_)));
+        assert_eq!(state.settlement.bundles.len(), 1);
+
+        // Tampering a leg's fee while keeping its intent_id must be refused.
+        let mut tampered_leg = leg_c.clone();
+        tampered_leg.max_fee = 0;
+        let tampered_bundle = IntentBundle::new(owner, vec![tampered_leg], 200, 10);
+        let tampered_err = execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::Bundle(Box::new(BundleTx::Open(Box::new(tampered_bundle)))),
+        )
+        .expect_err("tampered leg payload mismatching open intent must be refused");
+        assert!(matches!(tampered_err, SettlementTxError::Refused(_)));
+
+        // A bundle whose legs exceed max_total_fee must be refused at the door.
+        let over_budget = IntentBundle::new(owner, vec![leg_c.clone()], 200, 49);
+        let budget_err = execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::Bundle(Box::new(BundleTx::Open(Box::new(over_budget)))),
+        )
+        .expect_err("underfunded bundle budget must be refused");
+        assert!(matches!(budget_err, SettlementTxError::Refused(_)));
+
+        // An already-settled intent cannot be bound into a new bundle.
+        state
+            .settlement
+            .relayer_policy
+            .settled_intents
+            .insert(leg_c.intent_id);
+        let settled_bundle = IntentBundle::new(owner, vec![leg_c], 200, 400);
+        let settled_err = execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::Bundle(Box::new(BundleTx::Open(Box::new(settled_bundle)))),
+        )
+        .expect_err("binding an already-settled intent must be refused");
+        assert!(matches!(settled_err, SettlementTxError::Refused(_)));
+        assert_eq!(state.settlement.bundles.len(), 1);
     }
 
     #[test]
@@ -6653,5 +6994,271 @@ mod tests {
             .is_err(),
             "the zero address was allowed to liquidate"
         );
+    }
+
+    #[test]
+    fn denomination_blocks_non_operator_squatting_and_accepts_distinct_domain_roots() {
+        let mut state = AccountState::new();
+        state.current_block_height = 5;
+        let op = Address::from([0x21; 32]);
+        let squatter = Address::from([0x22; 32]);
+
+        let mut d1 = default_domain(101, ConsensusKind::PoS, 101, "pos-qc-finality", 1);
+        d1.operator = Some(op);
+        let mut d2 = default_domain(102, ConsensusKind::PoS, 102, "pos-qc-finality", 1);
+        d2.operator = Some(op);
+        register_domain(&mut state, d1).unwrap();
+        register_domain(&mut state, d2).unwrap();
+        assert!(state.anchor_external_root(101, [0xAA; 32]));
+        assert!(state.anchor_external_root(102, [0xBB; 32]));
+
+        let members = vec![
+            crate::settlement::universal_asset::AssetMember::new(101, [0x01; 32]),
+            crate::settlement::universal_asset::AssetMember::new(102, [0x02; 32]),
+        ];
+        let sq = crate::settlement::universal_asset::Denomination::declare_anchored(
+            squatter,
+            members.clone(),
+            "USDC",
+            5,
+            [0xAA; 32],
+            5,
+        );
+        assert!(execute_settlement_tx(
+            &mut state,
+            &ctx(squatter),
+            &SettlementTx::Denominate(Box::new(sq))
+        )
+        .is_err());
+
+        let legit = crate::settlement::universal_asset::Denomination::declare_anchored(
+            op, members, "USDC", 5, [0xAA; 32], 5,
+        );
+        let denom_id = legit.denomination_id;
+        execute_settlement_tx(
+            &mut state,
+            &ctx(op),
+            &SettlementTx::Denominate(Box::new(legit)),
+        )
+        .unwrap();
+        assert!(state.settlement.denominations.get(&denom_id).is_some());
+    }
+
+    #[test]
+    fn bundle_tx_enforces_cross_bundle_uniqueness_payload_match_and_sweep_refund() {
+        let mut state = AccountState::new();
+        state.current_block_height = 5;
+        let owner = Address::from([0x71; 32]);
+        state.add_balance(&owner, 10_000);
+        let pol = crate::relayer::PolicyEnvelope {
+            owner,
+            session_key: None,
+            spending_cap: 500,
+            allowed_domains: vec![1, 2, 3],
+            requires_multisig: false,
+            requires_hsm: false,
+            expires_at_block: 100,
+        };
+
+        let leg1 = crate::relayer::UserIntent::new(
+            owner,
+            1,
+            2,
+            crate::relayer::RelayerActionKind::ExternalTransaction {
+                chain: crate::core::transaction::ExternalChain::Ethereum,
+                target_address: "0x00000000000000000000000000000000000000B1".into(),
+                payload_hash: [0x11; 32],
+            },
+            100,
+            50,
+            1,
+            pol.policy_hash(),
+            Address::from([0x72; 32]),
+        );
+        let leg2 = crate::relayer::UserIntent::new(
+            owner,
+            2,
+            3,
+            crate::relayer::RelayerActionKind::ExternalTransaction {
+                chain: crate::core::transaction::ExternalChain::Ethereum,
+                target_address: "0x00000000000000000000000000000000000000B2".into(),
+                payload_hash: [0x12; 32],
+            },
+            150,
+            50,
+            2,
+            pol.policy_hash(),
+            Address::from([0x72; 32]),
+        );
+        for leg in [&leg1, &leg2] {
+            execute_settlement_tx(
+                &mut state,
+                &ctx(owner),
+                &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Open {
+                    intent: Box::new(leg.clone()),
+                    policy: Box::new(pol.clone()),
+                })),
+            )
+            .unwrap();
+        }
+        let bal_after_open = state.get_balance(&owner);
+
+        // Spoofed leg payload matching intent_id must be rejected.
+        let mut spoofed_leg = leg1.clone();
+        spoofed_leg.max_fee = 1;
+        let bad_bundle = crate::relayer::bundle::IntentBundle::new(
+            owner,
+            vec![spoofed_leg, leg2.clone()],
+            30,
+            500,
+        );
+        assert!(execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::Bundle(Box::new(BundleTx::Open(Box::new(bad_bundle))))
+        )
+        .is_err());
+
+        // Valid bundle opens.
+        let b1 = crate::relayer::bundle::IntentBundle::new(
+            owner,
+            vec![leg1.clone(), leg2.clone()],
+            25,
+            500,
+        );
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::Bundle(Box::new(BundleTx::Open(Box::new(b1)))),
+        )
+        .unwrap();
+
+        // Second bundle reusing leg1 must fail.
+        let b2 = crate::relayer::bundle::IntentBundle::new(owner, vec![leg1], 30, 500);
+        assert!(execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::Bundle(Box::new(BundleTx::Open(Box::new(b2))))
+        )
+        .is_err());
+
+        // Sweep at bundle deadline 25 refunds both legs' escrow cleanly.
+        let (done, refunded) = sweep_bundles(&mut state, 25);
+        assert_eq!((done, refunded), (0, 1));
+        assert_eq!(state.get_balance(&owner), bal_after_open + 250);
+    }
+
+    #[test]
+    fn bundle_close_refuses_partial_settlement_and_account_unified_balance_tracks_domain_height() {
+        let mut state = AccountState::new();
+        state.current_block_height = 5;
+        let owner = Address::from([0x81; 32]);
+        state.add_balance(&owner, 10_000);
+        let pol = crate::relayer::PolicyEnvelope {
+            owner,
+            session_key: None,
+            spending_cap: 500,
+            allowed_domains: vec![1, 2, 3],
+            requires_multisig: false,
+            requires_hsm: false,
+            expires_at_block: 100,
+        };
+
+        let mut dom = default_domain(105, ConsensusKind::PoS, 105, "pos-qc-finality", 1);
+        dom.operator = Some(owner);
+        register_domain(&mut state, dom).unwrap();
+        assert!(state.anchor_external_root(105, [0xCC; 32]));
+        let root_before = state.settlement.root();
+        let denom = crate::settlement::universal_asset::Denomination::declare_anchored(
+            owner,
+            vec![crate::settlement::universal_asset::AssetMember::new(
+                105, [0x99; 32],
+            )],
+            "USDX",
+            42,
+            [0xCC; 32],
+            42,
+        );
+        let denom_id = denom.denomination_id;
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::Denominate(Box::new(denom)),
+        )
+        .unwrap();
+        assert_ne!(state.settlement.root(), root_before);
+        state
+            .settlement
+            .domains
+            .get_mut(105)
+            .expect("domain 105")
+            .last_committed_height = 42;
+        let totals = state
+            .unified_balance_for(&[denom_id], |_, _| Some(777))
+            .unwrap();
+        assert_eq!(totals[0].total, 777);
+        assert_eq!(totals[0].true_as_of_height, 42);
+
+        // Open 2 legs and mark leg1 settled; Close must refuse mid-flight.
+        let leg1 = crate::relayer::UserIntent::new(
+            owner,
+            1,
+            2,
+            crate::relayer::RelayerActionKind::ExternalTransaction {
+                chain: crate::core::transaction::ExternalChain::Ethereum,
+                target_address: "0x00000000000000000000000000000000000000B3".into(),
+                payload_hash: [0x31; 32],
+            },
+            100,
+            50,
+            1,
+            pol.policy_hash(),
+            Address::from([0x82; 32]),
+        );
+        let leg2 = crate::relayer::UserIntent::new(
+            owner,
+            2,
+            3,
+            crate::relayer::RelayerActionKind::ExternalTransaction {
+                chain: crate::core::transaction::ExternalChain::Ethereum,
+                target_address: "0x00000000000000000000000000000000000000B4".into(),
+                payload_hash: [0x32; 32],
+            },
+            100,
+            50,
+            2,
+            pol.policy_hash(),
+            Address::from([0x82; 32]),
+        );
+        for leg in [&leg1, &leg2] {
+            execute_settlement_tx(
+                &mut state,
+                &ctx(owner),
+                &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Open {
+                    intent: Box::new(leg.clone()),
+                    policy: Box::new(pol.clone()),
+                })),
+            )
+            .unwrap();
+        }
+        let b = crate::relayer::bundle::IntentBundle::new(owner, vec![leg1.clone(), leg2], 30, 500);
+        let b_id = b.bundle_id;
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::Bundle(Box::new(BundleTx::Open(Box::new(b)))),
+        )
+        .unwrap();
+        state
+            .settlement
+            .relayer_policy
+            .settled_intents
+            .insert(leg1.intent_id);
+        assert!(execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::Bundle(Box::new(BundleTx::Close { bundle_id: b_id }))
+        )
+        .is_err());
     }
 }

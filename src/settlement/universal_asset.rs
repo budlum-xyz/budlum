@@ -441,6 +441,28 @@ impl DenominationIndex {
             .iter()
             .find(|d| &d.denomination_id == universal_id)
     }
+
+    /// Deterministic root committing to all admitted denominations.
+    #[must_use]
+    pub fn root(&self) -> Hash32 {
+        let mut sorted: Vec<&Denomination> = self.entries.iter().collect();
+        sorted.sort_by_key(|d| d.denomination_id);
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_DENOMINATIONS_V1");
+        hasher.update(
+            u64::try_from(sorted.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        for d in sorted {
+            hasher.update(d.denomination_id);
+            hasher.update(d.issuer.as_bytes());
+            hasher.update(d.anchored_at_block.to_le_bytes());
+            hasher.update(d.anchor_root);
+            hasher.update(d.anchor_height.to_le_bytes());
+        }
+        hasher.finalize().into()
+    }
 }
 
 #[cfg(test)]

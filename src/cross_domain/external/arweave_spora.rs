@@ -454,6 +454,12 @@ impl ExternalFinalityAdapter for ArweaveSpOraAdapter {
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError> {
+        if evidence.adapter != self.descriptor().id {
+            return Err(AdapterError::WrongAdapter {
+                expected: ADAPTER_NAME.to_string(),
+                found: hex::encode(evidence.adapter.as_bytes()),
+            });
+        }
         if evidence.evidence_version != EVIDENCE_VERSION {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -839,6 +845,29 @@ mod tests {
                 Err(AdapterError::UnslashableBacking)
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
+        );
+    }
+
+    #[test]
+    fn wrong_adapter_evidence_is_refused() {
+        let (ev, op) = sample_evidence_with_operator("arweave-mainnet");
+        let adapter = ArweaveSpOraAdapter::new("arweave-mainnet")
+            .with_pinned_operator(op.ed.public_key_bytes(), op.pq.public_key_bytes().to_vec());
+        let raw_wrong_adapter = RawConsensusEvidence {
+            adapter: AdapterId::from_name("ethereum-beacon-sync-v1"),
+            evidence_version: EVIDENCE_VERSION,
+            network: "arweave-mainnet".to_string(),
+            payload: encode_arweave_spora_evidence(&ev),
+            declared_height: ev.block_height,
+            declared_root: ev.weave_root,
+            submitter: crate::core::address::Address([0; 32]),
+        };
+        let err = adapter
+            .verify(&raw_wrong_adapter, &VerificationPolicy::strict(0))
+            .expect_err("evidence claiming a foreign adapter id must fail closed");
+        assert!(
+            matches!(err, AdapterError::WrongAdapter { .. }),
+            "expected WrongAdapter, got {err:?}"
         );
     }
 }

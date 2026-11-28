@@ -257,11 +257,11 @@ impl IntentBundle {
 
     /// The total fee the owner is on the hook for if every leg fills.
     ///
-    /// Saturating: a sum that overflows is larger than any budget, and
-    /// `budget_covers_fees` refuses it rather than wrapping to a small number
-    /// that would look affordable.
+    /// Saturating test helper; production budget checks use checked addition
+    /// inside [`Self::budget_covers_fees`] so overflowing sums never clamp.
+    #[cfg(test)]
     #[must_use]
-    pub fn total_max_fee(&self) -> u64 {
+    fn total_max_fee(&self) -> u64 {
         self.legs
             .iter()
             .fold(0u64, |acc, leg| acc.saturating_add(leg.max_fee))
@@ -270,7 +270,10 @@ impl IntentBundle {
     /// Whether the legs' fees fit inside the bundle's budget.
     #[must_use]
     pub fn budget_covers_fees(&self) -> bool {
-        self.total_max_fee() <= self.max_total_fee
+        self.legs
+            .iter()
+            .try_fold(0u64, |acc, leg| acc.checked_add(leg.max_fee))
+            .is_some_and(|total| total <= self.max_total_fee)
     }
 
     /// The domains this bundle touches, deduplicated and ordered.

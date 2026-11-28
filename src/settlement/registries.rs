@@ -66,7 +66,11 @@ pub struct SettlementRegistries {
     /// A bundle binds legs that already exist as ordinary intents; it never
     /// opens one. Written only by `SettlementTx::Bundle`, and empty on a chain
     /// that never opened one, so its presence changes no root until used.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[serde(
+        default,
+        with = "crate::core::map_keys",
+        skip_serializing_if = "std::collections::BTreeMap::is_empty"
+    )]
     pub bundles: std::collections::BTreeMap<[u8; 32], crate::relayer::bundle::IntentBundle>,
     /// The finality checkpoint headers: built by the transition of
     /// every checkpoint block from the state at its end.
@@ -111,6 +115,8 @@ impl SettlementRegistries {
             && self.relayer.is_empty()
             && self.relayer_policy.is_empty()
             && self.app_binding.is_empty()
+            && self.denominations.is_empty()
+            && self.bundles.is_empty()
             && self.global_headers.is_empty()
             && self.shared_security.is_empty()
             && self.quantum.is_empty()
@@ -206,7 +212,46 @@ impl SettlementRegistries {
             fields.push(b"BDLM_OBJECT_LAYER_V1");
             fields.push(&object_layer);
         }
+        // Denominations and intent bundles join only once populated, preserving
+        // pinned roots on chains that never created either.
+        let denominations = self.denominations.root();
+        if !self.denominations.is_empty() {
+            fields.push(b"BDLM_DENOMINATION_INDEX_V1");
+            fields.push(&denominations);
+        }
+        let bundles = self.bundles_root();
+        if !self.bundles.is_empty() {
+            fields.push(b"BDLM_INTENT_BUNDLES_V1");
+            fields.push(&bundles);
+        }
         hash_fields_bytes(&fields)
+    }
+
+    fn bundles_root(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"BDLM_INTENT_BUNDLES_ROOT_V1");
+        hasher.update(
+            u64::try_from(self.bundles.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        for (bundle_id, bundle) in &self.bundles {
+            hasher.update(bundle_id);
+            hasher.update(bundle.owner.as_bytes());
+            hasher.update(bundle.deadline_block.to_le_bytes());
+            hasher.update(bundle.max_total_fee.to_le_bytes());
+            hasher.update(
+                u64::try_from(bundle.legs.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
+            for leg in &bundle.legs {
+                hasher.update(leg.intent_id);
+            }
+        }
+        hasher.finalize().into()
     }
 
     /// Computes the canonical `ULP-1` binary `Poseidon` Merkle root over all
@@ -765,5 +810,72 @@ mod tests {
         assert_eq!(p3.bucket, FinalityBucket::Refuted);
         assert_eq!(p3.entry.verdict, FinalityVerdict::Refuted { code: 1 });
         assert!(p3.verify(&cert.refuted_root));
+    }
+
+    #[test]
+    fn a_denomination_changes_the_settlement_root() {
+        use crate::core::address::Address;
+        use crate::settlement::universal_asset::{AssetMember, Denomination};
+
+        let mut registries = SettlementRegistries::new();
+        let before = registries.root();
+        assert!(registries.is_empty());
+
+        let denom = Denomination::declare_anchored(
+            Address::from([0x11; 32]),
+            vec![AssetMember::new(1, [0x22; 32])],
+            "USDC",
+            1,
+            [0x33; 32],
+            1,
+        );
+        registries
+            .denominations
+            .admit(denom, |domain| domain == 1)
+            .expect("valid denomination admits cleanly");
+
+        assert!(!registries.is_empty());
+        assert_ne!(before, registries.root());
+    }
+
+    #[test]
+    fn an_intent_bundle_changes_the_settlement_root() {
+        use crate::core::address::Address;
+        use crate::core::transaction::ExternalChain;
+        use crate::relayer::bundle::IntentBundle;
+        use crate::relayer::policy::{RelayerActionKind, UserIntent};
+
+        let mut registries = SettlementRegistries::new();
+        let before = registries.root();
+        assert!(registries.is_empty());
+
+        let owner = Address::from([0x41; 32]);
+        let leg = UserIntent::new(
+            owner,
+            1,
+            2,
+            RelayerActionKind::ExternalTransaction {
+                chain: ExternalChain::Ethereum,
+                target_address: "0x01".into(),
+                payload_hash: [0x01; 32],
+            },
+            50,
+            500,
+            1,
+            [0x11; 32],
+            Address::from([0xB2; 32]),
+        );
+        let bundle = IntentBundle::new(owner, vec![leg], 200, 100);
+        registries.bundles.insert(bundle.bundle_id, bundle);
+
+        assert!(!registries.is_empty());
+        assert_ne!(before, registries.root());
+
+        let json = serde_json::to_string(&registries)
+            .expect("registries with non-empty bundles must serialize cleanly to JSON");
+        let decoded: SettlementRegistries = serde_json::from_str(&json)
+            .expect("registries with non-empty bundles must deserialize cleanly from JSON");
+        assert_eq!(decoded.bundles.len(), 1);
+        assert_eq!(decoded.root(), registries.root());
     }
 }

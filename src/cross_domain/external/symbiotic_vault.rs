@@ -540,6 +540,12 @@ impl ExternalFinalityAdapter for SymbioticVaultAdapter {
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError> {
+        if evidence.adapter != self.descriptor().id {
+            return Err(AdapterError::WrongAdapter {
+                expected: ADAPTER_NAME.to_string(),
+                found: hex::encode(evidence.adapter.as_bytes()),
+            });
+        }
         if evidence.evidence_version != EVIDENCE_VERSION {
             return Err(AdapterError::ConsensusRule {
                 rule: format!(
@@ -991,6 +997,29 @@ mod tests {
                 Err(AdapterError::UnslashableBacking)
             ),
             "require_slashable=true must fail closed with UnslashableBacking"
+        );
+    }
+
+    #[test]
+    fn wrong_adapter_evidence_is_refused() {
+        let (ev, committee) = sample_evidence_with_committee("mainnet");
+        let adapter = SymbioticVaultAdapter::new("mainnet")
+            .with_pinned_committee_keys(&committee.classical_pubkeys(), &committee.pq_pubkeys());
+        let raw_wrong_adapter = RawConsensusEvidence {
+            adapter: AdapterId::from_name("ethereum-beacon-sync-v1"),
+            evidence_version: EVIDENCE_VERSION,
+            network: "mainnet".to_string(),
+            payload: encode_symbiotic_evidence(&ev),
+            declared_height: ev.epoch,
+            declared_root: ev.collateral_root,
+            submitter: crate::core::address::Address([0; 32]),
+        };
+        let err = adapter
+            .verify(&raw_wrong_adapter, &default_policy())
+            .expect_err("evidence claiming a foreign adapter id must fail closed");
+        assert!(
+            matches!(err, AdapterError::WrongAdapter { .. }),
+            "expected WrongAdapter, got {err:?}"
         );
     }
 }

@@ -274,8 +274,13 @@ impl NetworkCatalog {
             .adapters
             .get(adapter_id)
             .ok_or_else(|| AdapterError::UnknownAdapter(adapter_id.to_string()))?;
-        // The caller names one adapter and the evidence names another: that
-        // is a wrong route, and the adapter itself refuses it by name.
+        let descriptor = adapter.descriptor();
+        if evidence.adapter != descriptor.id {
+            return Err(AdapterError::WrongAdapter {
+                expected: descriptor.name,
+                found: hex::encode(evidence.adapter.as_bytes()),
+            });
+        }
         adapter.verify(evidence, policy)
     }
 
@@ -476,6 +481,70 @@ mod tests {
             bitcoin.networks.len() <= 2,
             "bitcoin-spv carries more networks than were offered: {:?}",
             bitcoin.networks
+        );
+    }
+
+    #[test]
+    fn catalog_verify_refuses_evidence_whose_adapter_does_not_match_route() {
+        struct UncheckedAdapter;
+        impl ExternalFinalityAdapter for UncheckedAdapter {
+            fn descriptor(&self) -> AdapterDescriptor {
+                AdapterDescriptor {
+                    id: AdapterId::from_name("unchecked-test-adapter"),
+                    name: "unchecked-test-adapter".into(),
+                    adapter_version: 1,
+                    accepted_evidence_versions: vec![1],
+                    consensus_kind: "test".into(),
+                    finality_kind: super::super::spec::FinalityKind::ProtocolFinality,
+                    required_depth: 1,
+                    time_unit: super::super::spec::TimeUnit::Height,
+                    trust_model: super::super::spec::TrustModel::Trustless,
+                }
+            }
+
+            fn verify(
+                &self,
+                _evidence: &RawConsensusEvidence,
+                _policy: &VerificationPolicy,
+            ) -> Result<FinalityAttestation, AdapterError> {
+                panic!("NetworkCatalog::verify must refuse mismatched adapter id before calling adapter.verify");
+            }
+
+            fn verify_observed(
+                &self,
+                evidence: &RawConsensusEvidence,
+                policy: &VerificationPolicy,
+                _observer: &mut dyn crate::crypto::facts::CryptoObserver,
+            ) -> Result<FinalityAttestation, AdapterError> {
+                self.verify(evidence, policy)
+            }
+
+            fn fault_probes(&self) -> Vec<crate::cross_domain::external::selftest::FaultProbe> {
+                Vec::new()
+            }
+        }
+
+        let mut catalog = NetworkCatalog::new();
+        catalog.offer(Box::new(UncheckedAdapter));
+        let route_id = hex::encode(AdapterId::from_name("unchecked-test-adapter").as_bytes());
+        let err = catalog
+            .verify(
+                &route_id,
+                &RawConsensusEvidence {
+                    adapter: AdapterId::from_name("completely-different-adapter"),
+                    evidence_version: 1,
+                    network: "mainnet".into(),
+                    payload: Vec::new(),
+                    declared_height: 1,
+                    declared_root: [0xAA; 32],
+                    submitter: Address::from([0x11; 32]),
+                },
+                &VerificationPolicy::strict(0),
+            )
+            .expect_err("catalog verify must enforce adapter id match");
+        assert!(
+            matches!(err, AdapterError::WrongAdapter { .. }),
+            "expected WrongAdapter, got {err:?}"
         );
     }
 }

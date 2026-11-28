@@ -313,8 +313,12 @@ where
 {
     let mut terms: Vec<BalanceTerm> = Vec::new();
     let mut excluded: Vec<(Hash32, u32, BalanceError)> = Vec::new();
+    let mut seen_assets: std::collections::BTreeSet<Hash32> = std::collections::BTreeSet::new();
 
     for asset in assets {
+        if !seen_assets.insert(*asset) {
+            continue;
+        }
         let Some(denomination) = denominations.get(asset) else {
             // The asset is not denominated: it cannot be attributed, and the
             // caller is told which one it was.
@@ -347,17 +351,21 @@ where
         }
     }
 
-    let (mut totals, unattributed) = totals_by_asset(&terms, denominations)?;
+    let (mut totals, _unattributed) = totals_by_asset(&terms, denominations)?;
 
     // Fold the per-domain exclusions into the asset they belong to, so a caller
-    // reading a total also sees exactly which chains it is missing.
+    // reading a total also sees exactly which chains it is missing (even when
+    // every domain or the denomination itself is missing).
     for (asset, domain, error) in excluded {
         if let Some(total) = totals.iter_mut().find(|t| t.universal_asset == asset) {
-            total.excluded.push((domain, error));
-        } else if unattributed
-            .iter()
-            .any(|e| matches!(e, BalanceError::Unattributed))
-        {
+            if !total
+                .excluded
+                .iter()
+                .any(|(d, e)| *d == domain && *e == error)
+            {
+                total.excluded.push((domain, error));
+            }
+        } else {
             // An asset whose every term was excluded still deserves an entry,
             // so the caller sees "this asset, nothing, and here is why".
             totals.push(AssetTotal {
@@ -562,5 +570,40 @@ mod tests {
         assert_eq!(totals[0].universal_asset, stray);
         assert_eq!(totals[0].total, 0);
         assert_eq!(totals[0].excluded[0].1, BalanceError::Unattributed);
+    }
+
+    #[test]
+    fn denominated_asset_with_all_domains_unfinalized_gets_zero_entry_and_reasons() {
+        let (index, usdc) = usdc_index();
+        let roots = std::collections::BTreeMap::new();
+        let totals = unified_balance(&index, &roots, &[usdc, usdc], |_, _| Some(500)).expect("ok");
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].total, 0);
+        assert_eq!(totals[0].domains, 0);
+        assert_eq!(
+            totals[0].excluded,
+            vec![
+                (1, BalanceError::NotCryptographicallyFinal { domain: 1 }),
+                (9, BalanceError::NotCryptographicallyFinal { domain: 9 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_asset_with_finalized_domain_is_not_double_counted() {
+        let (index, usdc) = usdc_index();
+        let mut roots = std::collections::BTreeMap::new();
+        roots.insert(1, ([0x11; 32], 10));
+        let totals = unified_balance(&index, &roots, &[usdc, usdc], |domain, _| {
+            (domain == 1).then_some(500)
+        })
+        .expect("ok");
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].total, 500);
+        assert_eq!(totals[0].domains, 1);
+        assert_eq!(
+            totals[0].excluded,
+            vec![(9, BalanceError::NotCryptographicallyFinal { domain: 9 })]
+        );
     }
 }
