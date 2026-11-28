@@ -1056,6 +1056,27 @@ impl CommitmentAttestation {
     /// finality profile derivation without loosening [`Self::for_domain`].
     #[must_use]
     pub fn for_proof(domain: &ConsensusDomain, proof: &FinalityProof) -> Self {
+        if matches!(proof, FinalityProof::Raw(_)) {
+            // Raw bytes are refused by every adapter and bind no commitment
+            // fields. Attestation must be fail-closed regardless of domain kind.
+            return Self {
+                state_root: false,
+                tx_root: false,
+                event_root: false,
+                parent: false,
+            };
+        }
+        if matches!(proof, FinalityProof::AggregatedProg { .. }) {
+            // AggregatedProg binds the full commitment inside BudAir; attestation
+            // is only meaningful when the domain allowlists a transition program.
+            let allowlisted = !domain.zk_program_allowlist.is_empty();
+            return Self {
+                state_root: allowlisted,
+                tx_root: allowlisted,
+                event_root: allowlisted,
+                parent: allowlisted,
+            };
+        }
         match (&domain.kind, proof) {
             (ConsensusKind::Dag, FinalityProof::Dag { .. } | FinalityProof::DagPq { .. })
             | (ConsensusKind::Poh, FinalityProof::Poh { .. } | FinalityProof::PohPq { .. })
@@ -6206,5 +6227,41 @@ mod tests {
         )
         .expect_err("out-of-order backlog beyond per-domain quota must be rejected");
         assert!(err.contains("quota exceeded"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn commitment_attestation_for_raw_proof_is_fail_closed() {
+        let mut domain = default_domain(777, ConsensusKind::PoW, 7777, "pow-v1", 1);
+        // PoW non-Bitcoin-SPV normally attests state/tx/event/parent, but a Raw
+        // proof binds nothing and must not inherit that attestation.
+        let att = CommitmentAttestation::for_proof(&domain, &FinalityProof::Raw(vec![1, 2, 3]));
+        assert!(!att.state_root);
+        assert!(!att.tx_root);
+        assert!(!att.event_root);
+        assert!(!att.parent);
+
+        domain.kind = ConsensusKind::PoA;
+        let att_poa = CommitmentAttestation::for_proof(&domain, &FinalityProof::Raw(vec![9]));
+        assert!(!att_poa.state_root && !att_poa.tx_root && !att_poa.event_root && !att_poa.parent);
+    }
+
+    #[test]
+    fn commitment_attestation_for_aggregated_prog_requires_allowlist() {
+        let mut domain = default_domain(778, ConsensusKind::Zk, 7778, "zk-agg-v1", 1);
+        let proof = FinalityProof::AggregatedProg {
+            program_hash: [7u8; 32],
+            prev_height: 0,
+            prev_state_root: [0u8; 32],
+            claim_digest: [9u8; 32],
+        };
+        // Empty allowlist: fail-closed, no roots attested.
+        domain.zk_program_allowlist.clear();
+        let closed = CommitmentAttestation::for_proof(&domain, &proof);
+        assert!(!closed.state_root && !closed.tx_root && !closed.event_root && !closed.parent);
+
+        // Allowlisted: AggregatedProg binds full commitment inside BudAir.
+        domain.zk_program_allowlist = vec![[7u8; 32]];
+        let open = CommitmentAttestation::for_proof(&domain, &proof);
+        assert!(open.state_root && open.tx_root && open.event_root && open.parent);
     }
 }
