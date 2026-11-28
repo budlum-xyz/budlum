@@ -175,6 +175,22 @@ impl FinalityGuarantee {
         proof: &crate::domain::FinalityProof,
         pq_enforced: bool,
     ) -> Self {
+        if matches!(proof, crate::domain::FinalityProof::Raw(_)) {
+            // Raw bytes are refused by every adapter and bind no commitment
+            // field. The guarantee must be fail-closed regardless of domain kind.
+            return Self {
+                reversibility: FinalityReversibility::DeterministicQuorum,
+                quantum_posture: QuantumClass::Classical,
+                attestation: CommitmentAttestation {
+                    state_root: false,
+                    tx_root: false,
+                    event_root: false,
+                    parent: false,
+                },
+                slashable_backing: false,
+                fault_tolerance_bps: 0,
+            };
+        }
         if matches!(proof, crate::domain::FinalityProof::AggregatedProg { .. }) {
             let allowlisted = !domain.zk_program_allowlist.is_empty();
             return Self {
@@ -2711,5 +2727,23 @@ mod external_backing_tests {
                  the external guarantee must be derived from the observed backing only"
             );
         }
+    }
+
+    #[test]
+    fn raw_finality_proof_is_fail_closed_regardless_of_domain_kind() {
+        let mut domain = default_domain(99, ConsensusKind::PoS, 9999, "native-pos-v1", 1);
+        domain.validator_set_hash = [0xAA; 32];
+        let g = FinalityGuarantee::for_proof(
+            &domain,
+            &crate::domain::FinalityProof::Raw(vec![1, 2, 3]),
+            true,
+        );
+        assert_eq!(g.fault_tolerance_bps, 0);
+        assert!(!g.slashable_backing);
+        assert!(!g.attestation.state_root);
+        assert!(!g.attestation.tx_root);
+        assert!(!g.attestation.event_root);
+        assert!(!g.attestation.parent);
+        assert!(!g.admits_cross_domain_value());
     }
 }
