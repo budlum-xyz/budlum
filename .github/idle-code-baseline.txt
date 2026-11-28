@@ -501,7 +501,6 @@ src/core/block.rs	fn	mine
 src/core/chain_config.rs	const	EPOCH_LEN
 src/core/chain_config.rs	const	MAX_VOTES_PER_MSG
 src/core/chain_config.rs	const	PROTOCOL_VERSION
-src/core/chain_config.rs	const	SLOT_MS
 src/core/chain_config.rs	fn	finality_quorum
 src/core/chain_config.rs	struct	ConsensusParams
 src/core/constitution.rs	enum	ConstitutionParameterKey
