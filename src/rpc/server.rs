@@ -5950,7 +5950,7 @@ impl BudlumApiServer for RpcServer {
     async fn data_market_prepare_listing(
         &self,
         seller: String,
-        content_id: String,
+        content_id: serde_json::Value,
         object_key: String,
         nft_id: String,
         price_atoms: u64,
@@ -6037,7 +6037,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         buyer: String,
         listing_id: String,
-        content_id: String,
+        content_id: serde_json::Value,
         price_atoms: u64,
         buyer_ml_dsa_87_pk: String,
         buyer_hpke_pk: String,
