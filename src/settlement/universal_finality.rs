@@ -877,6 +877,27 @@ pub enum FinalityPendingReason {
     BondUnverified,
 }
 
+/// Verify the live economic backing behind a claimed slashable guarantee.
+///
+/// A proof family may describe slashable backing in its consensus shape, but a
+/// domain row is economically backed only when a non-zero escrowed bond and a
+/// pinned backing anchor are both present. A missing bond or anchor is a named,
+/// re-submittable debt, not a refutation of the external chain.
+#[must_use]
+pub const fn verify_slashable_bond_backing(
+    guarantee: &FinalityGuarantee,
+    bond_atoms: u128,
+    guarantee_backing_hash: &[u8; 32],
+) -> Result<(), FinalityPendingReason> {
+    if !guarantee.slashable_backing {
+        return Ok(());
+    }
+    if bond_atoms == 0 || *guarantee_backing_hash == [0u8; 32] {
+        return Err(FinalityPendingReason::BondUnverified);
+    }
+    Ok(())
+}
+
 /// Three-valued verdict for a single domain, in the evidence algebra
 /// `Established` / `Refuted` / `Pending`.
 ///
@@ -1561,6 +1582,28 @@ mod tests {
             slashable_backing: true,
             fault_tolerance_bps: BFT_FAULT_TOLERANCE_BPS,
         }
+    }
+
+    #[test]
+    fn slashable_bond_backing_requires_a_live_bond_and_pinned_anchor() {
+        let mut guarantee = hub_guarantee();
+        assert_eq!(
+            verify_slashable_bond_backing(&guarantee, 1_000, &[0xBB; 32]),
+            Ok(())
+        );
+        assert_eq!(
+            verify_slashable_bond_backing(&guarantee, 0, &[0xBB; 32]),
+            Err(FinalityPendingReason::BondUnverified)
+        );
+        assert_eq!(
+            verify_slashable_bond_backing(&guarantee, 1_000, &[0u8; 32]),
+            Err(FinalityPendingReason::BondUnverified)
+        );
+        guarantee.slashable_backing = false;
+        assert_eq!(
+            verify_slashable_bond_backing(&guarantee, 0, &[0u8; 32]),
+            Ok(())
+        );
     }
 
     #[test]

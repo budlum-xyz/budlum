@@ -74,6 +74,53 @@ pub struct SettlementRegistries {
     pub object_layer: ObjectLayerRegistry,
 }
 
+/// Derive one domain's three-valued verdict from state-derived evidence.
+///
+/// A claimed slashable guarantee is established only when its live escrow and
+/// pinned backing anchor are present. The bond check is deliberately separate
+/// from the proof check: a cryptographic proof cannot create collateral that
+/// the registry does not hold.
+fn domain_finality_verdict(
+    status: crate::domain::types::DomainStatus,
+    has_live_commitment: bool,
+    state_root: [u8; 32],
+    guarantee: &crate::settlement::universal_finality::FinalityGuarantee,
+    bond_atoms: u128,
+    guarantee_backing_hash: &[u8; 32],
+) -> crate::settlement::universal_finality::FinalityVerdict {
+    use crate::settlement::universal_finality::{
+        verify_slashable_bond_backing, FinalityPendingReason, FinalityVerdict, FINALITY_BINDS_ALL,
+    };
+
+    match status {
+        crate::domain::types::DomainStatus::Frozen => FinalityVerdict::Refuted { code: 1 },
+        crate::domain::types::DomainStatus::Retired => FinalityVerdict::Pending {
+            reason: FinalityPendingReason::RuleNotSatisfied,
+        },
+        crate::domain::types::DomainStatus::Active => {
+            if !has_live_commitment || state_root == [0u8; 32] {
+                FinalityVerdict::Pending {
+                    reason: FinalityPendingReason::EvidenceMissing,
+                }
+            } else if guarantee.attestation != FINALITY_BINDS_ALL {
+                FinalityVerdict::Pending {
+                    reason: FinalityPendingReason::AttestationUnbound,
+                }
+            } else if guarantee.fault_tolerance_bps == 0 {
+                FinalityVerdict::Pending {
+                    reason: FinalityPendingReason::RuleNotSatisfied,
+                }
+            } else if let Err(reason) =
+                verify_slashable_bond_backing(guarantee, bond_atoms, guarantee_backing_hash)
+            {
+                FinalityVerdict::Pending { reason }
+            } else {
+                FinalityVerdict::Established
+            }
+        }
+    }
+}
+
 impl SettlementRegistries {
     #[must_use]
     pub fn new() -> Self {
@@ -255,35 +302,20 @@ impl SettlementRegistries {
                 .map_or(([0u8; 32], [0u8; 32]), |c| {
                     (c.state_root, c.finality_proof_hash)
                 });
-            let verdict = match domain.status {
-                DomainStatus::Frozen => FinalityVerdict::Refuted { code: 1 },
-                DomainStatus::Retired => FinalityVerdict::Pending {
-                    reason: FinalityPendingReason::RuleNotSatisfied,
-                },
-                DomainStatus::Active => match latest_commitment {
-                    Some(c) if c.state_root != [0u8; 32] => {
-                        if guarantee.attestation != FINALITY_BINDS_ALL {
-                            FinalityVerdict::Pending {
-                                reason: FinalityPendingReason::AttestationUnbound,
-                            }
-                        } else if guarantee.fault_tolerance_bps == 0 {
-                            FinalityVerdict::Pending {
-                                reason: FinalityPendingReason::RuleNotSatisfied,
-                            }
-                        } else {
-                            FinalityVerdict::Established
-                        }
-                    }
-                    _ => FinalityVerdict::Pending {
-                        reason: FinalityPendingReason::EvidenceMissing,
-                    },
-                },
-            };
             let guarantee_backing_hash = if domain.validator_set_hash != [0u8; 32] {
                 domain.validator_set_hash
             } else {
                 domain.config_hash
             };
+            let bond_atoms = u128::from(domain.operator_bond);
+            let verdict = domain_finality_verdict(
+                domain.status,
+                latest_commitment.is_some(),
+                state_root,
+                &guarantee,
+                bond_atoms,
+                &guarantee_backing_hash,
+            );
             entries.push(DomainFinalityEntry {
                 domain_id: domain.id,
                 height: domain.last_committed_height,
@@ -293,7 +325,7 @@ impl SettlementRegistries {
                 adapter_version: 1,
                 finality_proof_hash,
                 guarantee_backing_hash,
-                bond_atoms: u128::from(domain.operator_bond),
+                bond_atoms,
                 guarantee,
                 verdict,
             });
@@ -449,6 +481,67 @@ fn ulp_domain_kind_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_slashable_domain_without_live_bond_backing_is_re_submittable_pending() {
+        use crate::domain::types::DomainStatus;
+        use crate::settlement::universal_finality::{
+            FinalityGuarantee, FinalityPendingReason, FinalityVerdict,
+        };
+
+        let guarantee = FinalityGuarantee::settlement_hub();
+        let no_bond = domain_finality_verdict(
+            DomainStatus::Active,
+            true,
+            [0x30; 32],
+            &guarantee,
+            0,
+            &[0xBB; 32],
+        );
+        assert_eq!(
+            no_bond,
+            FinalityVerdict::Pending {
+                reason: FinalityPendingReason::BondUnverified
+            }
+        );
+
+        let no_anchor = domain_finality_verdict(
+            DomainStatus::Active,
+            true,
+            [0x30; 32],
+            &guarantee,
+            1_000,
+            &[0u8; 32],
+        );
+        assert_eq!(
+            no_anchor,
+            FinalityVerdict::Pending {
+                reason: FinalityPendingReason::BondUnverified
+            }
+        );
+
+        let live = domain_finality_verdict(
+            DomainStatus::Active,
+            true,
+            [0x30; 32],
+            &guarantee,
+            1_000,
+            &[0xBB; 32],
+        );
+        assert_eq!(live, FinalityVerdict::Established);
+
+        let mut unslashable = guarantee;
+        unslashable.slashable_backing = false;
+        let no_bond_needed = domain_finality_verdict(
+            DomainStatus::Active,
+            true,
+            [0x30; 32],
+            &unslashable,
+            0,
+            &[0u8; 32],
+        );
+        assert_eq!(no_bond_needed, FinalityVerdict::Established);
+    }
 
     #[test]
     fn a_clock_tick_alone_leaves_the_registries_empty() {
