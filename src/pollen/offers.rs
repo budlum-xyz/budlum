@@ -429,14 +429,17 @@ impl MarketplaceRegistry {
                  listing to another"
             ));
         }
-        // The counter saturates at u64::MAX rather than refusing the last id.
-        // The live-id guard above already refuses to mint over an id that
-        // resolves, so a saturated counter cannot hand one seller's listing to
-        // another: the second attempt at `u64::MAX` is refused by that guard.
-        // `checked_add` refused the id `u64::MAX` itself, which loses the last
-        // value of the space and breaks the recorded contract this module's
-        // test pins.
-        let next_offer_id = self.next_offer_id.saturating_add(1);
+        // The id space ends at `u64::MAX - 1`: the terminal id is a tombstone
+        // and is never issued. Two rules were fighting here - "saturate so the
+        // last usable id is not lost" and "refuse so a saturated counter can
+        // never re-mint an id whose row was pruned". Ending the space one id
+        // early satisfies both: `u64::MAX - 1` is still issued, and a counter
+        // that reaches `u64::MAX` can never hand out a second id, live row or
+        // not.
+        let next_offer_id = self
+            .next_offer_id
+            .checked_add(1)
+            .ok_or_else(|| "the offer id space is exhausted".to_string())?;
         let offer = DataOffer {
             id,
             seller,
@@ -2189,13 +2192,16 @@ mod tests {
     }
 
     #[test]
-    fn offer_counter_saturates_and_encryption_policy_cap_holds() {
+    fn offer_counter_issues_the_last_usable_id_and_holds_encryption_policy_cap() {
         let mut reg = MarketplaceRegistry::new();
         let seller = addr(1);
         let cid = ContentId([0xEE; 32]);
-        reg.next_offer_id = u64::MAX;
+        // The id space ends at `u64::MAX - 1`: the last *usable* id is issued
+        // (that is what the saturating change was protecting), and the terminal
+        // id is refused (that is what a saturated counter must never re-mint).
+        reg.next_offer_id = u64::MAX - 1;
         let id = reg.create_offer(seller, cid, 50, 7).unwrap();
-        assert_eq!(id, u64::MAX);
+        assert_eq!(id, u64::MAX - 1);
         assert_eq!(reg.next_offer_id, u64::MAX);
         assert!(reg.create_offer(seller, cid, 50, 7).is_err());
 
@@ -2213,13 +2219,16 @@ mod tests {
         let mut reg = MarketplaceRegistry::new();
         let seller = addr(1);
         let cid = ContentId([0x7A; 32]);
-        reg.next_offer_id = u64::MAX;
-        assert_eq!(reg.create_offer(seller, cid, 10, 1), Ok(u64::MAX));
-        // The counter is saturated, so a second mint at the same id is refused
-        // by the live-id guard rather than by an arithmetic overflow: the id
-        // `u64::MAX` resolves to the first seller and to nobody else.
+        reg.next_offer_id = u64::MAX - 1;
+        assert_eq!(reg.create_offer(seller, cid, 10, 1), Ok(u64::MAX - 1));
+        // The counter now names the terminal id, which is a tombstone: a second
+        // mint is refused, and it is refused *before* any row lookup, so a
+        // pruned or restored-away row cannot reopen the id either.
         assert!(reg.create_offer(seller, cid, 99, 1).is_err());
-        assert_eq!(reg.offers.get(&u64::MAX).map(|o| o.seller), Some(seller));
+        assert_eq!(
+            reg.offers.get(&(u64::MAX - 1)).map(|o| o.seller),
+            Some(seller)
+        );
         assert_eq!(reg.next_offer_id, u64::MAX);
     }
 
