@@ -437,6 +437,12 @@ mod tests {
     /// `BUDLUM_BUD3_ACCEPTANCE_TRIALS`. The default keeps an ordinary debug
     /// `cargo test --lib` in the same shape at a fraction of the cost, which is
     /// the split `pq_vectors_differential_random_inputs` already uses.
+    ///
+    /// `sweep_claims_its_directive` below closes the hole that split left open:
+    /// a default of 8 makes `decoded` 48, and `failures * 10_000 <= decoded`
+    /// then breaks on a single drop, so the ordinary run cannot state the
+    /// 99.99 % the directive asks for. The variable was also set nowhere in
+    /// `.github/`, so the 10 000-trial figure had never run at all.
     fn acceptance_trials() -> usize {
         std::env::var("BUDLUM_BUD3_ACCEPTANCE_TRIALS")
             .ok()
@@ -601,10 +607,50 @@ mod tests {
         );
         // The directive's bar: at least 99.99 % recovery. Stated as a ratio so
         // the nightly figure and the default both read the same rule.
+        //
+        // At the default of 8 trials `decoded` is 48 and this bar admits no
+        // failure at all, which is stricter than 99.99 % and weaker as a
+        // claim: 48 trials cannot distinguish 99.99 % from 99 %. So the
+        // summary says which of the two the run is. The 10 000-trial figure
+        // that can is driven by `sweep_claims_its_directive` in CI.
         assert!(
             failures * 10_000 <= decoded,
             "T6 wants at least 99.99 % recovery; {failures} of {decoded} trials failed"
         );
+        if decoded < 10_000 {
+            eprintln!(
+                "acceptance sweep: {decoded} trials at the default size; this is the smoke \
+                 shape, not the directive's 10 000-trial 99.99 % claim (set \
+                 BUDLUM_BUD3_ACCEPTANCE_TRIALS and see the sweep_claims_its_directive job)"
+            );
+        }
+    }
+
+    /// The 10 000-trial sweep the directive asks for, and the guard that it
+    /// actually ran at that size.
+    ///
+    /// `bud3_fountain_acceptance` reads `BUDLUM_BUD3_ACCEPTANCE_TRIALS` and
+    /// reports 48 trials by default. Nothing set that variable in `.github/`,
+    /// so between the directive and today no run ever measured the 99.99 %
+    /// the directive names. This test fails when the variable is unset, so the
+    /// nightly job cannot silently go back to the default, and it fails when
+    /// the sweep did not reach 10 000 trials per loss case.
+    ///
+    /// `#[ignore]` because an ordinary `cargo test --lib` does not set the
+    /// variable: without the attribute the default run would turn red on a
+    /// job that is not the one that owes the 10 000 trials. The nightly job in
+    /// `conformance-nightly.yml` names this test explicitly and proves it ran
+    /// by grepping its `... ok` line, so an ignored test cannot pass silently.
+    #[test]
+    #[ignore = "10 000 trials: driven by conformance-nightly.yml with BUDLUM_BUD3_ACCEPTANCE_TRIALS=10000"]
+    fn sweep_claims_its_directive() {
+        let trials = acceptance_trials();
+        assert!(
+            trials >= 10_000,
+            "the directive's 99.99 % claim needs at least 10 000 trials per loss case; \
+             this run was given {trials}. Drive it with BUDLUM_BUD3_ACCEPTANCE_TRIALS=10000."
+        );
+        bud3_fountain_acceptance();
     }
 
     #[test]
