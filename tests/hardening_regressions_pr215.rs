@@ -24,9 +24,13 @@ use budlum_core::cross_domain::external::spec::{
     AdapterError, AdapterId, ExternalFinalityAdapter, RawConsensusEvidence, SecurityBacking,
     VerificationPolicy,
 };
-use budlum_core::crypto::facts::CryptoFacts;
+use budlum_core::crypto::facts::{CryptoFacts, ObservedScheme, QuantumClass};
 use budlum_core::crypto::scheme::SchemeId;
 use budlum_core::pollen::offers::{DataOffer, MarketplaceRegistry, MAX_OFFERS};
+use budlum_core::settlement::universal_finality::{
+    compose, DomainFinalityEntry, FinalityBinds, FinalityGuarantee, FinalityReversibility,
+    FinalityVerdict,
+};
 use budlum_core::storage::content_id::ContentId;
 
 fn must<T, E: std::fmt::Debug>(res: Result<T, E>, msg: &str) -> T {
@@ -279,4 +283,341 @@ fn auxpow_pop_committee_less_anchor_pin_and_fault_probes_hold() {
         adapter.verify(&raw, &slash_policy),
         Err(AdapterError::UnslashableBacking)
     ));
+}
+
+#[test]
+fn forged_global_finality_certificate_is_refused_without_state_change() {
+    let mut guard = BridgeEconomicGuard::new();
+    let domain_id = 409u32;
+    let policy = DomainCeilingPolicy {
+        backing: SecurityBacking::SignatureSet {
+            scheme: ObservedScheme::Secp256k1,
+            signers: 4,
+            required: 3,
+            total_weight: 300_000,
+            slashable: true,
+        },
+        stake_haircut_bps: 3_333,
+        window_blocks: 100,
+        ..DomainCeilingPolicy::default()
+    };
+    must(
+        guard.configure_domain(domain_id, policy, None),
+        "configure domain 409",
+    );
+
+    let cert = must(
+        compose(&[DomainFinalityEntry {
+            domain_id,
+            height: 12,
+            checkpoint_height: 50,
+            state_root: [0x11; 32],
+            adapter_id: "cometbft-v1".to_owned(),
+            adapter_version: 1,
+            finality_proof_hash: [0x22; 32],
+            guarantee_backing_hash: [0x33; 32],
+            bond_atoms: 300_000,
+            binds: FinalityBinds::ALL,
+            guarantee: FinalityGuarantee {
+                reversibility: FinalityReversibility::DeterministicQuorum,
+                quantum_posture: QuantumClass::Hash,
+                attestation: budlum_core::settlement::universal_finality::FINALITY_BINDS_ALL,
+                slashable_backing: true,
+                fault_tolerance_bps: 3_333,
+            },
+            verdict: FinalityVerdict::Established,
+        }]),
+        "compose valid finality certificate",
+    );
+
+    let mut forged = cert.clone();
+    forged.certificate_digest[0] ^= 0xFF;
+
+    let root_before = guard.root();
+    let res = guard.check_and_record_flow_with_certificate(domain_id, 1_000, 50, &forged);
+    assert!(
+        matches!(res, Err(EconomicGuardError::InvalidEvidence(_))),
+        "forged certificate digest must fail closed with InvalidEvidence, got: {res:?}"
+    );
+    assert_eq!(
+        guard.root(),
+        root_before,
+        "forged certificate must not mutate economic guard state"
+    );
+}
+
+#[test]
+fn verification_policy_require_slashable_refuses_unslashable_backing() {
+    use budlum_core::cross_domain::external::spec::ProofSystem;
+
+    let policy = VerificationPolicy {
+        require_slashable: true,
+        ..VerificationPolicy::strict(1_000)
+    };
+    let unslashable = [
+        SecurityBacking::None,
+        SecurityBacking::Authority { count: 4 },
+        SecurityBacking::Work {
+            difficulty_bits: 80,
+        },
+        SecurityBacking::Zk {
+            system: ProofSystem::Stark,
+            public_inputs_digest: [0x11; 32],
+        },
+        SecurityBacking::SignatureSet {
+            scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
+            signers: 4,
+            required: 3,
+            total_weight: 100_000,
+            slashable: false,
+        },
+    ];
+    for backing in unslashable {
+        assert_eq!(
+            policy.admits_backing(&backing),
+            Err(AdapterError::UnslashableBacking),
+            "require_slashable=true must refuse {backing:?}"
+        );
+    }
+    let slashable = SecurityBacking::SignatureSet {
+        scheme: ObservedScheme::Scheme(SchemeId::ML_DSA_65),
+        signers: 4,
+        required: 3,
+        total_weight: 100_000,
+        slashable: true,
+    };
+    assert_eq!(policy.admits_backing(&slashable), Ok(()));
+}
+
+#[test]
+fn tendermint_misbehaviour_slash_refuses_forged_next_validators_hash_and_anchor_mismatch() {
+    use budlum_core::core::chain_config::Network;
+    use budlum_core::cross_domain::external::intake::{
+        AdapterSpec, IntakeError, IntakeState, RegistrationRequest,
+    };
+    use budlum_core::cross_domain::external::registry::RegistryError;
+    use budlum_core::cross_domain::external::spec::DomainKey;
+    use budlum_core::cross_domain::external::tendermint::{
+        validator_address_of, validator_set_commitment, validator_set_hash, vote_sign_bytes,
+        PinnedTendermintAnchor, TendermintCommitEvidence, TendermintLightParams,
+        TendermintMisbehaviour, TendermintSignature, TendermintValidator, TrustedTendermintState,
+        EVIDENCE_VERSION,
+    };
+    use budlum_core::cross_domain::external::versioning::VersionPolicy;
+    use budlum_core::crypto::primitives::KeyPair;
+    use budlum_core::domain::plugin::default_domain;
+    use budlum_core::domain::ConsensusKind;
+    use budlum_core::settlement::domains::{
+        register_domain, SettlementTxContext, SettlementTxError,
+    };
+    use budlum_core::settlement::shared_security::execute_tendermint_misbehaviour_slash;
+    use budlum_core::AccountState;
+
+    let keys: Vec<KeyPair> = (80u8..=83)
+        .map(|s| must(KeyPair::from_seed(&[s; 32]), "tendermint key"))
+        .collect();
+    let tm_vals: Vec<TendermintValidator> = keys
+        .iter()
+        .map(|k| {
+            let pk = k.public_key_bytes();
+            TendermintValidator {
+                address: validator_address_of(&pk),
+                public_key: pk,
+                voting_power: 100,
+            }
+        })
+        .collect();
+    let chain_id = "provider-ics-1";
+    let network = "ics-provider";
+    let set_hash = validator_set_hash(&tm_vals);
+    let set_commitment = validator_set_commitment(&tm_vals);
+    let ts = 1_790_000_600u64;
+    let parts = [0x33u8; 32];
+
+    let mk_commit =
+        |height: u64, app_hash: [u8; 32], signers: &[usize]| -> TendermintCommitEvidence {
+            let mut c = TendermintCommitEvidence {
+                chain_id: chain_id.to_string(),
+                height,
+                round: 0,
+                block_hash: [0u8; 32],
+                parts_total: 1,
+                parts_hash: parts,
+                version_block: 11,
+                last_block_hash: [0x11; 32],
+                last_parts_total: 1,
+                last_parts_hash: [0x22; 32],
+                last_commit_hash: [0x33; 32],
+                data_hash: [0x44; 32],
+                validators_hash: set_hash,
+                next_validators_hash: set_hash,
+                consensus_hash: [0x66; 32],
+                app_hash,
+                last_results_hash: [0x88; 32],
+                evidence_hash: [0xaa; 32],
+                proposer_address: tm_vals[0].address,
+                commit_time: ts,
+                commit_time_nanos: 0,
+                validators: tm_vals.clone(),
+                signatures: Vec::new(),
+            };
+            c.block_hash = c.header_hash();
+            c.signatures = signers
+                .iter()
+                .map(|&i| {
+                    let msg = vote_sign_bytes(
+                        chain_id,
+                        height,
+                        0,
+                        &c.block_hash,
+                        1,
+                        &parts,
+                        (i64::try_from(ts).expect("ts fits i64"), 0),
+                    );
+                    TendermintSignature {
+                        address: tm_vals[i].address,
+                        timestamp_seconds: i64::try_from(ts).expect("ts fits i64"),
+                        timestamp_nanos: 0,
+                        signature: keys[i].sign(&msg).to_vec(),
+                    }
+                })
+                .collect();
+            c
+        };
+
+    let golden_commit = mk_commit(900, [0x51; 32], &[0, 1, 2]);
+    let spec = AdapterSpec::TendermintCommit {
+        network: network.to_string(),
+        chain_id: chain_id.to_string(),
+        validator_set_hash: Some(set_commitment),
+    };
+    let adapter_id = AdapterId::from_name(&format!("tendermint-commit-{network}"));
+    let economics = IntakeState::conservative_economics(1_000_000);
+    let bond_atoms = economics.required_bond_atoms();
+    let payload = must(bincode::serialize(&golden_commit), "encode tm golden");
+    let mut intake = IntakeState::new();
+    intake.pin_tendermint_anchor(
+        network,
+        PinnedTendermintAnchor {
+            chain_id: chain_id.to_string(),
+            validator_set_hash: set_commitment,
+        },
+    );
+    let key = must(
+        intake.register_domain(
+            RegistrationRequest {
+                spec,
+                policy: VerificationPolicy {
+                    min_depth: 1,
+                    max_age: 1_000,
+                    now: ts + 10,
+                    require_declared_match: true,
+                    require_slashable: true,
+                },
+                economics,
+                versions: VersionPolicy::single(adapter_id, EVIDENCE_VERSION, 0),
+                bond_atoms,
+                poster: addr(0x41),
+                golden: RawConsensusEvidence {
+                    adapter: adapter_id,
+                    evidence_version: EVIDENCE_VERSION,
+                    network: network.to_string(),
+                    payload,
+                    declared_height: 900,
+                    declared_root: golden_commit.app_hash,
+                    submitter: addr(0x42),
+                },
+            },
+            None,
+        ),
+        "register pinned Tendermint domain",
+    );
+
+    let light_params = must(
+        TendermintLightParams::standard_for_unbonding(1_814_400),
+        "valid standard unbonding params",
+    );
+    let forged_trusted = TrustedTendermintState {
+        chain_id: chain_id.to_string(),
+        height: 900,
+        time_secs: ts,
+        trusting_period_secs: light_params.trusting_period_secs,
+        validators: tm_vals.clone(),
+        next_validators_hash: [0xEE; 32],
+    };
+    let honest_next = mk_commit(901, [0x52; 32], &[0, 1, 2]);
+    let misbehaviour = TendermintMisbehaviour {
+        header_1: honest_next.clone(),
+        header_2: None,
+    };
+    let intake_res = intake.adjudicate_tendermint_misbehaviour(
+        &key,
+        &forged_trusted,
+        &light_params,
+        &misbehaviour,
+        ts + 10,
+    );
+    assert!(
+        matches!(
+            intake_res,
+            Err(IntakeError::Registry(RegistryError::Adapter(
+                AdapterError::ConsensusRule { .. }
+            )))
+        ),
+        "intake adjudicate_tendermint_misbehaviour must refuse forged next_validators_hash: {intake_res:?}"
+    );
+
+    // Also verify shared-security execution refuses a domain with an unpinned/mismatched
+    // DomainKey in `domain.config_hash`.
+    let dom_id = 778u32;
+    let dom_op = addr(0x51);
+    let mut state = AccountState::new();
+    let mut domain = default_domain(
+        dom_id,
+        ConsensusKind::Custom("tendermint-bft".to_string()),
+        778_001,
+        budlum_core::cross_domain::external::EXTERNAL_DOMAIN_FINALITY_ADAPTER,
+        1,
+    );
+    domain.operator = Some(dom_op);
+    domain.plugin_code_hash = Some([0x77; 32]);
+    domain.config_hash = DomainKey::from_parts(&adapter_id, "wrong-network").0;
+    state.add_balance(&dom_op, domain.operator_bond.saturating_add(10));
+    must(
+        register_domain(&mut state, domain),
+        "register mismatched domain",
+    );
+    state.settlement.external_intake.pin_tendermint_anchor(
+        network,
+        PinnedTendermintAnchor {
+            chain_id: chain_id.to_string(),
+            validator_set_hash: set_hash,
+        },
+    );
+    let ctx = SettlementTxContext {
+        sender: addr(0x52),
+        chain_id: Network::Devnet.chain_id().value(),
+        fee: 5,
+        bls: IntakeState::production_bls,
+    };
+    let legitimate_trusted = TrustedTendermintState {
+        next_validators_hash: set_commitment,
+        ..forged_trusted
+    };
+    let ss_res = execute_tendermint_misbehaviour_slash(
+        &mut state,
+        &ctx,
+        dom_id,
+        &legitimate_trusted,
+        &light_params,
+        &TendermintMisbehaviour {
+            header_1: honest_next,
+            header_2: Some(mk_commit(901, [0x53; 32], &[1, 2, 3])),
+        },
+        ts + 10,
+    );
+    assert!(
+        matches!(ss_res, Err(SettlementTxError::Refused(_))),
+        "shared-security slash must refuse domain.config_hash anchor mismatch: {ss_res:?}"
+    );
 }

@@ -1,4 +1,4 @@
-//! Pin fail-closed canaries across all 21 `AdapterSpec` variants on `testnet-50`.
+//! Pin fail-closed canaries across all 32 `AdapterSpec` variants on `testnet-50`.
 //!
 //! Every `AdapterSpec` variant with an omitted governance anchor/pin must fail
 //! closed at `IntakeState::register_domain` with `IntakeError::CommitteeNotPinned`.
@@ -181,6 +181,83 @@ fn all_unpinned_variants() -> Vec<(&'static str, AdapterSpec)> {
         (
             "StarkValidityRollup",
             AdapterSpec::StarkValidityRollup {
+                network: NETWORK.to_string(),
+                pinned: None,
+            },
+        ),
+        (
+            "AlgorandStateProof",
+            AdapterSpec::AlgorandStateProof {
+                network: NETWORK.to_string(),
+                pinned: None,
+            },
+        ),
+        (
+            "ArweaveSpOra",
+            AdapterSpec::ArweaveSpOra {
+                network: NETWORK.to_string(),
+                pinned: None,
+            },
+        ),
+        (
+            "AuxPowPop",
+            AdapterSpec::AuxPowPop {
+                network: NETWORK.to_string(),
+                pinned: None,
+            },
+        ),
+        (
+            "BasedPreconf",
+            AdapterSpec::BasedPreconf {
+                network: NETWORK.to_string(),
+                pinned: None,
+            },
+        ),
+        (
+            "MinaSuccinctRecursive",
+            AdapterSpec::MinaSuccinctRecursive {
+                network: NETWORK.to_string(),
+                pinned: None,
+            },
+        ),
+        (
+            "OuroborosMithril",
+            AdapterSpec::OuroborosMithril {
+                network: NETWORK.to_string(),
+                pinned: None,
+            },
+        ),
+        (
+            "RestakingAvs",
+            AdapterSpec::RestakingAvs {
+                network: NETWORK.to_string(),
+                pinned: None,
+            },
+        ),
+        (
+            "SimplexBft",
+            AdapterSpec::SimplexBft {
+                network: NETWORK.to_string(),
+                pinned: None,
+            },
+        ),
+        (
+            "StellarScp",
+            AdapterSpec::StellarScp {
+                network: NETWORK.to_string(),
+                pinned: None,
+            },
+        ),
+        (
+            "SymbioticVault",
+            AdapterSpec::SymbioticVault {
+                network: NETWORK.to_string(),
+                pinned: None,
+            },
+        ),
+        (
+            "TonCatchainBft",
+            AdapterSpec::TonCatchainBft {
                 network: NETWORK.to_string(),
                 pinned: None,
             },

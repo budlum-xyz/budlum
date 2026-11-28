@@ -1743,6 +1743,11 @@ impl BridgeEconomicGuard {
         current_height: u64,
         certificate: &crate::settlement::universal_finality::GlobalFinalityCertificate,
     ) -> Result<(), EconomicGuardError> {
+        certificate.verify_integrity().map_err(|e| {
+            EconomicGuardError::InvalidEvidence(format!(
+                "invalid finality certificate integrity: {e:?}"
+            ))
+        })?;
         self.ensure_not_paused(domain_id)?;
         let Some(rec) = self.domains.get(&domain_id) else {
             if self.require_configured_domains {

@@ -805,6 +805,52 @@ mod tests {
         );
     }
 
+    /// A frozen domain is the one state the certificate builder maps to
+    /// `Refuted`, so the door must refuse it however healthy its commitment
+    /// looks. Nothing pinned that before: `Frozen` had coverage at the builder
+    /// but none at the door, which is where value actually moves.
+    #[test]
+    fn a_frozen_domain_cannot_anchor_value_even_with_a_healthy_commitment() {
+        use crate::domain::plugin::default_domain;
+        use crate::domain::types::{ConsensusKind, DomainStatus};
+        use crate::settlement::registries::SettlementRegistries;
+
+        let mut regs = SettlementRegistries::new();
+        let mut dom = default_domain(77, ConsensusKind::PoS, 77, "pos", 0);
+        dom.last_committed_height = 3;
+        dom.last_committed_hash = [0x77; 32];
+        regs.domains.register(dom).expect("register");
+        assert_eq!(
+            regs.domains.get(77).map(|d| d.status),
+            Some(DomainStatus::Active),
+            "fixture precondition: the domain starts Active"
+        );
+
+        regs.domains.get_mut(77).expect("domain").status = DomainStatus::Frozen;
+
+        assert_eq!(
+            enforce_domain_not_refuted(&regs, 10, ValueGate::ObjectLayerArrive, 77),
+            Err(ValueGateRefusal::DomainRefuted {
+                domain_id: 77,
+                code: 1,
+            }),
+            "a frozen domain must not anchor value"
+        );
+        // Every door reads the same row, so the refusal is not gate-specific.
+        for gate in [
+            ValueGate::BridgeMint,
+            ValueGate::BridgeUnlock,
+            ValueGate::RelayerIntentSettle,
+            ValueGate::AppBindingClaim,
+            ValueGate::UniversalPayment,
+        ] {
+            assert!(
+                enforce_domain_not_refuted(&regs, 10, gate, 77).is_err(),
+                "{gate:?} must refuse a frozen domain"
+            );
+        }
+    }
+
     #[test]
     fn sentry_circuit_escalation_halts_all_value_gates() {
         use crate::cross_domain::external::sentry::{
