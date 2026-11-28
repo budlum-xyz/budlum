@@ -308,6 +308,98 @@ fn adapter_spec_variant_indices_stay_pinned() {
     assert_eq!(u32::from_le_bytes(btc_bytes[0..4].try_into().unwrap()), 2);
 }
 
+/// STRX-194-01 full-pin lock: every persisted adapter family's bincode
+/// discriminant is pinned, not just tags 0, 1, 2. An insert or reorder
+/// anywhere in `AdapterSpec` fails this test — inserting in the middle would
+/// reinterpret every intake registration already persisted in consensus state.
+/// New families are APPENDED with a new highest tag and this test is updated
+/// in the same commit.
+#[test]
+fn adapter_spec_all_ten_indices_stay_pinned() {
+    let cases: [(Spec, u32); 10] = [
+        (
+            Spec::EthereumSync {
+                network: "n".to_string(),
+                committee: None,
+            },
+            0,
+        ),
+        (
+            Spec::ZkVm {
+                network: "n".to_string(),
+                program_hash: None,
+                chain_id: None,
+            },
+            1,
+        ),
+        (
+            Spec::BitcoinSpv {
+                network: "n".to_string(),
+                anchor: None,
+            },
+            2,
+        ),
+        (
+            Spec::TendermintCommit {
+                network: "n".to_string(),
+                chain_id: "c".to_string(),
+                validator_set_hash: None,
+            },
+            3,
+        ),
+        (
+            Spec::DataAvailability {
+                network: "n".to_string(),
+                committee: None,
+            },
+            4,
+        ),
+        (
+            Spec::HotStuffQc {
+                network: "n".to_string(),
+                committee: None,
+            },
+            5,
+        ),
+        (
+            Spec::DagCertificate {
+                network: "n".to_string(),
+                committee: None,
+            },
+            6,
+        ),
+        (
+            Spec::CasperFfg {
+                network: "n".to_string(),
+                committee: None,
+            },
+            7,
+        ),
+        (
+            Spec::MysticetiDag {
+                network: "n".to_string(),
+                committee: None,
+            },
+            8,
+        ),
+        (
+            Spec::BitVmCovenant {
+                network: "n".to_string(),
+                anchor: None,
+            },
+            9,
+        ),
+    ];
+    for (spec, want) in cases {
+        let bytes = bincode::serialize(&spec).expect("spec serializes");
+        let got = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        assert_eq!(
+            got, want,
+            "adapter family moved to bincode tag {got}: persisted intake registrations would be reinterpreted (STRX-194-01)"
+        );
+    }
+}
+
 /// The declared height and root are derived from the headers, not believed
 /// from the envelope. This is the replay/index-drift rule made executable.
 #[test]
