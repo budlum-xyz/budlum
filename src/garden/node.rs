@@ -24,7 +24,7 @@ use super::invite::{fit_peers, GardenInvite};
 use super::net::{
     self, announced_address, peer_id_of, validator_dial_address, BudgetedFrame, FramePermits,
     GardenGossip, GardenNet, GardenRequest, GardenResponse, NetCommand, NetEvent, MAX_GOSSIP_BATCH,
-    MAX_SYNC_COMMITS,
+    MAX_RESPONSE_BYTES, MAX_SYNC_COMMITS, SYMBOLS_PER_FRAME,
 };
 use super::record::{GardenRecord, DEFAULT_RECORD_TTL_MS};
 use super::settlement::{GardenBudlumLink, GardenDomainView};
@@ -329,6 +329,31 @@ enum Seen {
     Presence(GardenKey, u64),
 }
 
+/// A symbol set being deposited here one batch at a time.
+struct Arriving {
+    /// Which peer is sending it. Another peer's batches are not mixed in.
+    from: PeerId,
+    record: Box<crate::storage::bud3::pipeline::ObjectRecord>,
+    symbols: Vec<crate::storage::bud3::fountain::Symbol>,
+    started: Instant,
+}
+
+/// A symbol set being pulled from a holder one batch at a time.
+struct Pulling {
+    /// The holder answering. Symbols from a different peer are ignored:
+    /// one source per pull keeps the indices meaningful.
+    from: PeerId,
+    record: Box<crate::storage::bud3::pipeline::ObjectRecord>,
+    symbols: Vec<crate::storage::bud3::fountain::Symbol>,
+    total: u32,
+}
+
+/// How long an unfinished deposit is kept before its batches are dropped.
+const ARRIVING_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How many unfinished deposits this node holds batches for at once.
+const MAX_ARRIVING: usize = 8;
+
 struct Fetch {
     waiters: Vec<oneshot::Sender<Result<Vec<u8>, String>>>,
     outstanding: usize,
@@ -622,6 +647,12 @@ struct Node {
     seed_dials: Option<(Instant, Duration)>,
     fetches: BTreeMap<Hash32, Fetch>,
     fetch_tags: BTreeMap<u64, Hash32>,
+    /// Tags of symbol requests this node is waiting on.
+    coded_tags: BTreeMap<u64, Hash32>,
+    /// Symbol sets arriving from a peer in batches, by content id.
+    arriving: BTreeMap<Hash32, Arriving>,
+    /// Symbol sets being pulled from a holder, by content id.
+    pulling: BTreeMap<Hash32, Pulling>,
     relays: BTreeMap<u64, Relay>,
     relay_tags: BTreeMap<u64, u64>,
     next_tag: u64,
@@ -906,6 +937,9 @@ pub async fn spawn(
         seed_dials: None,
         fetches: BTreeMap::new(),
         fetch_tags: BTreeMap::new(),
+        coded_tags: BTreeMap::new(),
+        arriving: BTreeMap::new(),
+        pulling: BTreeMap::new(),
         relays: BTreeMap::new(),
         relay_tags: BTreeMap::new(),
         next_tag: TAG_FIRST_FETCH,
@@ -1996,6 +2030,8 @@ impl Node {
             GardenRequest::GetObject { .. }
             | GardenRequest::PutObject { .. }
             | GardenRequest::PutCodedObject { .. }
+            | GardenRequest::PutCodedBatch { .. }
+            | GardenRequest::GetCoded { .. }
                 if !self.is_seated(&peer) =>
             {
                 self.respond(
@@ -2092,6 +2128,230 @@ impl Node {
                         self.respond(channel, GardenResponse::Refused(err)).await;
                     }
                 }
+            }
+            GardenRequest::PutCodedBatch {
+                content_id,
+                record,
+                symbols,
+                remaining,
+            } => {
+                self.take_coded_batch(peer, content_id, record, symbols, remaining, channel, frame_budget)
+                    .await;
+            }
+            GardenRequest::GetCoded { content_id, from } => {
+                self.serve_coded(peer, content_id, from, channel).await;
+            }
+        }
+    }
+
+    /// Take one batch of a deposit that arrives as symbols.
+    ///
+    /// Batches are held until the last one says no more are coming, then
+    /// the set is rebuilt and goes through the same quotas and checks as
+    /// any other deposit. A set that never finishes is dropped on a timer,
+    /// and a peer cannot start more of them than `MAX_ARRIVING`.
+    async fn take_coded_batch(
+        &mut self,
+        peer: PeerId,
+        content_id: Hash32,
+        record: Box<crate::storage::bud3::pipeline::ObjectRecord>,
+        symbols: Vec<crate::storage::bud3::fountain::Symbol>,
+        remaining: u32,
+        channel: ResponseChannel<BudgetedFrame>,
+        frame_budget: FramePermits,
+    ) {
+        let now = Instant::now();
+        self.arriving
+            .retain(|_, set| now.duration_since(set.started) < ARRIVING_TIMEOUT);
+        // A deposit larger than this Garden accepts is refused before its
+        // batches are held, not after the last one arrives.
+        let declared = record.object_len;
+        if declared > u64::from(self.limits().max_object_bytes) {
+            self.respond(
+                channel,
+                GardenResponse::Refused(format!(
+                    "this is {declared} bytes and the Garden takes objects up to {}",
+                    self.limits().max_object_bytes
+                )),
+            )
+            .await;
+            return;
+        }
+        let fresh = !self.arriving.contains_key(&content_id);
+        if fresh && self.arriving.len() >= MAX_ARRIVING {
+            self.respond(
+                channel,
+                GardenResponse::Refused("too many unfinished deposits here".into()),
+            )
+            .await;
+            return;
+        }
+        let set = self.arriving.entry(content_id).or_insert_with(|| Arriving {
+            from: peer,
+            record,
+            symbols: Vec::new(),
+            started: now,
+        });
+        if set.from != peer {
+            self.respond(
+                channel,
+                GardenResponse::Refused("another peer is already sending this object".into()),
+            )
+            .await;
+            return;
+        }
+        set.symbols.extend(symbols);
+        if remaining > 0 {
+            self.respond(channel, GardenResponse::Ack).await;
+            return;
+        }
+        let Some(set) = self.arriving.remove(&content_id) else {
+            self.respond(channel, GardenResponse::Refused("the batches are gone".into()))
+                .await;
+            return;
+        };
+        match self
+            .store
+            .rebuild_coded(&content_id, &set.record, set.symbols)
+        {
+            Ok(bytes) => {
+                self.take_deposit(peer, bytes, channel, frame_budget).await;
+            }
+            Err(err) => {
+                self.respond(channel, GardenResponse::Refused(err)).await;
+            }
+        }
+    }
+
+    /// Answer a request for an object's symbols.
+    ///
+    /// A holder with a recipe answers from it, one frame's worth at a
+    /// time. A holder that has only the bytes answers with the bytes, so a
+    /// reader never has to ask twice in two different ways.
+    async fn serve_coded(
+        &mut self,
+        peer: PeerId,
+        content_id: Hash32,
+        from: u32,
+        channel: ResponseChannel<BudgetedFrame>,
+    ) {
+        let now = Instant::now();
+        let budget = self.object_budget.entry(peer).or_insert((now, 0, 0));
+        if now.duration_since(budget.0) >= OBJECT_RATE_WINDOW {
+            *budget = (now, 0, 0);
+        }
+        let max_bytes = u64::from(self.limits().max_object_bytes)
+            .saturating_mul(4)
+            .max(u64::try_from(MAX_RESPONSE_BYTES).unwrap_or(u64::MAX));
+        if budget.1 >= MAX_OBJECT_REQS_PER_WINDOW || budget.2 >= max_bytes {
+            self.respond(
+                channel,
+                GardenResponse::Refused("object request rate limit exceeded".into()),
+            )
+            .await;
+            return;
+        }
+        budget.1 = budget.1.saturating_add(1);
+        let Some((record, symbols)) = self.store.coded_parts(&content_id) else {
+            let bytes = self.store.get(&content_id);
+            if bytes.is_some() {
+                self.parts_served = self.parts_served.saturating_add(1);
+            }
+            self.respond(channel, GardenResponse::Object(bytes)).await;
+            return;
+        };
+        let total = u32::try_from(symbols.len()).unwrap_or(u32::MAX);
+        let start = usize::try_from(from).unwrap_or(usize::MAX).min(symbols.len());
+        let batch: Vec<_> = symbols
+            .into_iter()
+            .skip(start)
+            .take(SYMBOLS_PER_FRAME)
+            .collect();
+        let sent = u64::try_from(batch.len())
+            .unwrap_or(0)
+            .saturating_mul(u64::from(crate::storage::bud3::limits::Profile::P0.symbol_size));
+        if let Some(entry) = self.object_budget.get_mut(&peer) {
+            entry.2 = entry.2.saturating_add(sent);
+        }
+        if start.saturating_add(batch.len()) >= usize::try_from(total).unwrap_or(usize::MAX) {
+            self.parts_served = self.parts_served.saturating_add(1);
+        }
+        self.respond(
+            channel,
+            GardenResponse::Coded {
+                record: Box::new(record),
+                from,
+                symbols: batch,
+                total,
+            },
+        )
+        .await;
+    }
+
+    /// Take a batch of symbols that answered this node's own request.
+    async fn on_coded_answer(
+        &mut self,
+        peer: PeerId,
+        content_id: Hash32,
+        response: Result<GardenResponse, String>,
+    ) {
+        match response {
+            // A holder with no coding for the object sent the bytes
+            // instead, which is the answer this node would have had from
+            // `GetObject`.
+            Ok(GardenResponse::Object(bytes)) => {
+                self.pulling.remove(&content_id);
+                self.on_fetch_answer(content_id, bytes);
+            }
+            Ok(GardenResponse::Coded {
+                record,
+                from,
+                symbols,
+                total,
+            }) => {
+                let pull = self.pulling.entry(content_id).or_insert_with(|| Pulling {
+                    from: peer,
+                    record,
+                    symbols: Vec::new(),
+                    total,
+                });
+                let have = u32::try_from(pull.symbols.len()).unwrap_or(u32::MAX);
+                // Batches are appended in order from one holder. Anything
+                // else is a peer answering a question this node did not
+                // ask, and starting over is cheaper than reasoning about it.
+                if pull.from != peer || from != have || symbols.is_empty() {
+                    self.pulling.remove(&content_id);
+                    self.on_fetch_answer(content_id, None);
+                    return;
+                }
+                pull.symbols.extend(symbols);
+                let have = u32::try_from(pull.symbols.len()).unwrap_or(u32::MAX);
+                if have < total {
+                    let tag = self.fresh_tag();
+                    self.coded_tags.insert(tag, content_id);
+                    self.send(
+                        peer,
+                        GardenRequest::GetCoded {
+                            content_id,
+                            from: have,
+                        },
+                        tag,
+                    )
+                    .await;
+                    return;
+                }
+                let Some(pull) = self.pulling.remove(&content_id) else {
+                    return;
+                };
+                let rebuilt = self
+                    .store
+                    .rebuild_coded(&content_id, &pull.record, pull.symbols)
+                    .ok();
+                self.on_fetch_answer(content_id, rebuilt);
+            }
+            _ => {
+                self.pulling.remove(&content_id);
+                self.on_fetch_answer(content_id, None);
             }
         }
     }
@@ -2470,7 +2730,9 @@ impl Node {
                     Ok(GardenResponse::Object(Some(bytes))) => Some(bytes),
                     _ => None,
                 };
-                if let Some(job) = self.relay_tags.remove(&tag) {
+                if let Some(content_id) = self.coded_tags.remove(&tag) {
+                    self.on_coded_answer(peer, content_id, response).await;
+                } else if let Some(job) = self.relay_tags.remove(&tag) {
                     self.on_relay_answer(job, bytes).await;
                 } else if let Some(content_id) = self.fetch_tags.remove(&tag) {
                     self.on_fetch_answer(content_id, bytes);
@@ -2644,16 +2906,9 @@ impl Node {
         );
         for peer in targets {
             let tag = self.fresh_tag();
-            self.fetch_tags.insert(tag, content_id);
-            self.send(
-                peer,
-                GardenRequest::GetObject {
-                    content_id,
-                    relay: true,
-                },
-                tag,
-            )
-            .await;
+            self.coded_tags.insert(tag, content_id);
+            self.send(peer, GardenRequest::GetCoded { content_id, from: 0 }, tag)
+                .await;
         }
     }
 
@@ -3958,17 +4213,38 @@ impl Node {
             // node ends up with content it did not have, which is the
             // whole point of the counter.
             self.parts_served = self.parts_served.saturating_add(1);
-            let request = match coded.clone() {
-                Some((record, symbols)) => GardenRequest::PutCodedObject {
-                    content_id,
-                    record: Box::new(record),
-                    symbols,
-                },
-                None => GardenRequest::PutObject {
-                    bytes: bytes.clone(),
-                },
-            };
-            self.send(peer, request, TAG_IGNORE).await;
+            match coded.clone() {
+                Some((record, symbols)) => {
+                    // As many frames as the symbols take. The holder keeps
+                    // the batches until the last one, so an object larger
+                    // than a frame reaches it whole.
+                    let batches = symbols.len().div_ceil(SYMBOLS_PER_FRAME).max(1);
+                    for (index, batch) in symbols.chunks(SYMBOLS_PER_FRAME).enumerate() {
+                        let remaining = u32::try_from(batches - index - 1).unwrap_or(u32::MAX);
+                        self.send(
+                            peer,
+                            GardenRequest::PutCodedBatch {
+                                content_id,
+                                record: Box::new(record.clone()),
+                                symbols: batch.to_vec(),
+                                remaining,
+                            },
+                            TAG_IGNORE,
+                        )
+                        .await;
+                    }
+                }
+                None => {
+                    self.send(
+                        peer,
+                        GardenRequest::PutObject {
+                            bytes: bytes.clone(),
+                        },
+                        TAG_IGNORE,
+                    )
+                    .await;
+                }
+            }
         }
         let tx_id = self.submit(tx_kind).await?;
         Ok(json!({
@@ -4630,6 +4906,162 @@ mod tests {
         })
         .await
         .expect("the guest never became a validator");
+    }
+
+    /// An object larger than one network frame reaches the other node.
+    ///
+    /// This is the thing a 4 MB limit was standing in for. An object used
+    /// to cross in a single `PutCodedObject`, so the largest one a Garden
+    /// could carry was whatever a frame held once repair symbols had been
+    /// added to it, and the app printed a quarter of that at people as if
+    /// it were a rule about Gardens. Symbols are independent of each
+    /// other, which is the reason the object layer makes them, so they
+    /// travel in as many frames as it takes.
+    ///
+    /// The object here is deliberately larger than `MAX_RESPONSE_BYTES`,
+    /// so a single frame could not have carried it even before the repair
+    /// symbols were counted. It is published on one node and read back on
+    /// the other, byte for byte.
+    #[tokio::test]
+    async fn an_object_larger_than_a_frame_crosses_in_batches() {
+        let host_handle = host().await;
+        let invite = host_handle.invite().await.unwrap();
+        let guest = spawn(
+            GardenEntry::Invite(invite),
+            config("guest", "/ip4/127.0.0.1/tcp/0"),
+            random_bytes(),
+            None,
+        )
+        .await
+        .expect("the guest could not join");
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while guest.status().await.unwrap()["active_validators"] != 2 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the guest never became a validator");
+
+        let big = MAX_RESPONSE_BYTES + 1_000_000;
+        let payload: Vec<u8> = (0..big)
+            .map(|i| u8::try_from(i % 251).unwrap_or_default())
+            .collect();
+        assert!(
+            payload.len() > MAX_RESPONSE_BYTES,
+            "the point of this test is an object one frame cannot hold"
+        );
+        let published = host_handle
+            .publish(
+                GardenContentKind::Image,
+                payload.clone(),
+                "application/octet-stream".into(),
+                "big".into(),
+            )
+            .await
+            .expect("the host could not publish an object larger than a frame");
+        let content_id = <[u8; 32]>::try_from(
+            hex::decode(published["content_id"].as_str().unwrap())
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+
+        // The guest reads it back through the object layer, in batches.
+        let got = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if let Ok(bytes) = guest.resolve(content_id).await {
+                    return bytes;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("the guest never got the object");
+        assert_eq!(got.len(), payload.len(), "the object came back a different size");
+        assert!(got == payload, "the object came back changed");
+    }
+
+    /// A holder hands out an object's symbols a frame at a time.
+    ///
+    /// The serving half of the same change. A reader asks from an index
+    /// and gets as many symbols as a frame carries, with the total so it
+    /// knows how many more to ask for.
+    #[tokio::test]
+    async fn a_holder_serves_symbols_one_frame_at_a_time() {
+        let handle = host().await;
+        let invite = handle.invite().await.unwrap();
+        let (mut swarm, _key, peer) = guest(&invite).await;
+
+        let big = MAX_RESPONSE_BYTES + 1_000_000;
+        let payload: Vec<u8> = (0..big)
+            .map(|i| u8::try_from(i % 251).unwrap_or_default())
+            .collect();
+        let published = handle
+            .publish(
+                GardenContentKind::Image,
+                payload.clone(),
+                "application/octet-stream".into(),
+                "big".into(),
+            )
+            .await
+            .unwrap();
+        let content_id = <[u8; 32]>::try_from(
+            hex::decode(published["content_id"].as_str().unwrap())
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+
+        let mut have = 0u32;
+        let mut collected = Vec::new();
+        let mut record = None;
+        let mut rounds = 0;
+        loop {
+            let answer = ask(
+                &mut swarm,
+                peer,
+                GardenRequest::GetCoded {
+                    content_id,
+                    from: have,
+                },
+            )
+            .await;
+            let GardenResponse::Coded {
+                record: got,
+                from,
+                symbols,
+                total,
+            } = answer
+            else {
+                panic!("expected symbols, got {answer:?}");
+            };
+            assert_eq!(from, have, "the holder answered a different question");
+            assert!(
+                symbols.len() <= SYMBOLS_PER_FRAME,
+                "a batch has to fit one frame: {} symbols",
+                symbols.len()
+            );
+            assert!(
+                total as usize > SYMBOLS_PER_FRAME,
+                "this object is supposed to need more than one frame"
+            );
+            have = have.saturating_add(u32::try_from(symbols.len()).unwrap());
+            collected.extend(symbols);
+            record = Some(got);
+            rounds += 1;
+            if have >= total {
+                break;
+            }
+            assert!(rounds < 64, "the holder is not making progress");
+        }
+        assert!(rounds > 1, "a frame should not have held the whole object");
+
+        // The symbols rebuild the object the publication named.
+        let mut store = crate::garden::storage::GardenContentStore::open(None, big * 2).unwrap();
+        let rebuilt = store
+            .rebuild_coded(&content_id, &record.unwrap(), collected)
+            .expect("the batches did not rebuild the object");
+        assert!(rebuilt == payload, "the rebuilt object is not the one sent");
     }
 
     /// Inviting is not a host privilege. Any seated validator produces a
