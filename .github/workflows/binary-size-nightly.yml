@@ -1,0 +1,103 @@
+# Binary size: the report that used to run on every pull request push.
+#
+# Measured 2026-11-27: this job ran on the pull-request path with a 60-minute
+# budget, and it is a report rather than a gate (no size threshold is agreed, so
+# nothing can fail on the number). On the pull-request path its cost was paid by
+# every push: the same day the repository had 42 queued runs and two 120-minute
+# APK jobs holding the runners.
+#
+# A report that nothing blocks on does not need to run per push. Here it keeps
+# its evidence - the release build, the artifact check, the crate breakdown, the
+# PR/run summary - on a nightly schedule and on every push to `main`, which is
+# where a size trend is read. The pull-request fan-out budget
+# (`.github/ci-fanout-baseline.txt`) pays for the merge gate instead.
+#
+# The job body below is the same job, moved: same pins, same timeout, same
+# fail-closed requirement that the measurement must exist.
+
+name: Binary Size
+
+on:
+  schedule:
+    - cron: "43 3 * * *" # daily 03:43 UTC
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: binary-size-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  binary-size:
+    name: Binary Size (rapor)
+    runs-on: ubuntu-latest
+    # c4b49fda measured two independent 40-minute cancellations: the release
+    # build took 20m20s-20m41s and cargo-bloat was still measuring after
+    # 18m57s/19m21s. The measurement and every threshold stay unchanged; this
+    # budget lets the existing fail-closed report reach a verdict.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - name: Install protoc
+        run: python3 .github/scripts/install_protoc.py
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: budlum-core
+      - name: Install cargo-bloat (version pinned)
+        run: cargo install cargo-bloat --version 0.12.1 --locked
+      - name: Release build
+        run: cargo build --release --locked
+      - name: Size + the largest crates (into the PR summary)
+        run: |
+          set -uo pipefail
+          # Both masks here hid the same thing in two places: the release build
+          # ran in the step above, so a MISSING artifact is not a quiet
+          # "nothing to list", it is a build that did not produce what this job
+          # exists to measure. And `cargo bloat ... 2>/dev/null || echo` turned
+          # every failure of the tool into the sentence "(could not be run)"
+          # inside a green step - visibility with no consequence, which is the
+          # shape the charter calls a bos gecen kapi.
+          #
+          # Still not a size THRESHOLD (no number is agreed yet, and inventing
+          # one here would be a gate nobody chose). What blocks is narrower and
+          # certain: the measurement must exist.
+          set +e
+          ls -lh target/release/budlum-core target/release/libbudlum_core.rlib > /tmp/bloat-size.log 2>&1
+          size_status=$?
+          cargo bloat --release --crates -n 20 > /tmp/bloat-crates.log 2>&1
+          bloat_status=$?
+          set -e
+          {
+            echo "### Binary size"
+            echo '```'
+            cat /tmp/bloat-size.log
+            echo '```'
+            echo "### The crates taking the most space"
+            echo '```'
+            tail -40 /tmp/bloat-crates.log
+            echo '```'
+            echo "(ls exit: $size_status, cargo bloat exit: $bloat_status)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          fail=0
+          if [ "$size_status" -ne 0 ]; then
+            echo "::error::the release artifacts are not on disk after the release build - there is nothing to measure, so the size report is empty for a reason that is not size."
+            fail=1
+          fi
+          if [ "$bloat_status" -ne 0 ]; then
+            echo "::error::cargo bloat exited $bloat_status; the crate breakdown in this summary is missing, not small."
+            sed -e 's/^/::error::/' /tmp/bloat-crates.log | head -n 5
+            fail=1
+          fi
+          exit "$fail"
