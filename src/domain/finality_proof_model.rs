@@ -1247,4 +1247,68 @@ mod tests {
             Err(ExternalShapeError::SecurityBackingMismatch { .. })
         ));
     }
+
+    /// Common proof-model invariant: every built-in external verifier family
+    /// must round-trip through its canonical consensus_kind string, and no two
+    /// families may share the same string. This pins the "consensus of
+    /// consensuses" family registry against silent drift: a family added to the
+    /// enum without a stable kind, or a kind collision, breaks composition and
+    /// auditability.
+    #[test]
+    fn external_verifier_family_consensus_kind_roundtrips_and_is_unique() {
+        let families = [
+            ExternalVerifierFamily::AlgorandStateProof,
+            ExternalVerifierFamily::AptosJolteonBft,
+            ExternalVerifierFamily::ArweaveSpOra,
+            ExternalVerifierFamily::AuxPowPop,
+            ExternalVerifierFamily::BabylonEots,
+            ExternalVerifierFamily::BasedPreconf,
+            ExternalVerifierFamily::BitcoinNakamotoPow,
+            ExternalVerifierFamily::BitVmCovenant,
+            ExternalVerifierFamily::CasperFfg,
+            ExternalVerifierFamily::ChainKeyNiDkg,
+            ExternalVerifierFamily::CelestiaDas,
+            ExternalVerifierFamily::BullsharkDagBft,
+            ExternalVerifierFamily::EthereumGasperSync,
+            ExternalVerifierFamily::GhostdagPow,
+            ExternalVerifierFamily::HeterogeneousMultiProver,
+            ExternalVerifierFamily::HoneyBadgerBft,
+            ExternalVerifierFamily::HotStuffChainedBft,
+            ExternalVerifierFamily::MinaSuccinctRecursive,
+            ExternalVerifierFamily::MysticetiDag,
+            ExternalVerifierFamily::NearDoomslugBft,
+            ExternalVerifierFamily::NipopowSuperblock,
+            ExternalVerifierFamily::OuroborosMithril,
+            ExternalVerifierFamily::PoSpaceVdf,
+            ExternalVerifierFamily::RestakingAvs,
+            ExternalVerifierFamily::SimplexBft,
+            ExternalVerifierFamily::SolanaTowerBft,
+            ExternalVerifierFamily::StarkValidityRollup,
+            ExternalVerifierFamily::StellarScp,
+            ExternalVerifierFamily::SymbioticVault,
+            ExternalVerifierFamily::TendermintBft,
+            ExternalVerifierFamily::TonCatchainBft,
+            ExternalVerifierFamily::BudZkVmExecution,
+        ];
+
+        let mut seen = std::collections::BTreeSet::new();
+        for family in families {
+            let kind = family.consensus_kind();
+            assert!(!kind.is_empty(), "{family:?} must declare a consensus_kind");
+            assert!(
+                seen.insert(kind.to_string()),
+                "duplicate consensus_kind {kind} for {family:?}"
+            );
+            assert_eq!(
+                ExternalVerifierFamily::from_consensus_kind(kind),
+                Some(family),
+                "round-trip failed for {family:?} ({kind})"
+            );
+        }
+        assert_eq!(
+            seen.len(),
+            families.len(),
+            "family registry size drifted; update the invariant list when adding a family"
+        );
+    }
 }
