@@ -203,8 +203,26 @@ impl CanonicalRelayReport {
         p
     }
 
-    /// Recompute the signature and check it against `report_sig`.
+    /// Recompute the signature and check structural integrity (schema version,
+    /// status/alarm consistency, and NUL-free NUL-terminated string fields)
+    /// against `report_sig`.
     pub fn verify_report_sig(&self) -> bool {
+        if self.schema_version != RELAY_SCHEMA_VERSION {
+            return false;
+        }
+        if (self.status == RelayStatus::Ok) != self.alarm.is_none() {
+            return false;
+        }
+        if self.proof.backend.as_bytes().contains(&0)
+            || self.proof.p3_version.as_bytes().contains(&0)
+            || self.proof.fri_params_id.as_bytes().contains(&0)
+            || self
+                .alarm
+                .as_ref()
+                .is_some_and(|a| a.detail.as_bytes().contains(&0))
+        {
+            return false;
+        }
         keccak256(&self.canonical_payload()) == self.report_sig
     }
 

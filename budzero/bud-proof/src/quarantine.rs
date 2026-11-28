@@ -121,11 +121,15 @@ impl QuarantineLedger {
         hasher.finalize().into()
     }
 
-    /// Ban a program and return its rule id. Idempotent: banning an already
-    /// banned hash returns the existing rule id and changes nothing.
+    /// Ban a program and return its rule id. Idempotent for repeated bans of
+    /// the same severity; a severe offence upgrades an existing non-severe
+    /// entry so a subsequent non-canonical flood cannot evict it.
     pub fn ban(&mut self, program_hash: [u8; 32], reason: QuarantineReason) -> [u8; 32] {
         let rule_id = Self::derive_rule_id(&program_hash);
-        if let Some(entry) = self.entries.get(&program_hash) {
+        if let Some(entry) = self.entries.get_mut(&program_hash) {
+            if !entry.reason.is_severe() && reason.is_severe() {
+                entry.reason = reason;
+            }
             return entry.rule_id;
         }
         if !self.evict_for_reason(reason) {
@@ -185,8 +189,9 @@ impl QuarantineLedger {
         out
     }
 
-    /// Parse the text written by [`Self::to_text`]. A malformed line is an
-    /// error: a ledger that silently dropped a ban would lift it.
+    /// Parse the text written by [`Self::to_text`]. A malformed, non-canonical,
+    /// duplicate, or over-capacity line is an error: a ledger that silently
+    /// dropped a ban would lift it.
     pub fn from_text(text: &str) -> Result<Self, String> {
         let mut ledger = Self::new();
         for (index, line) in text.lines().enumerate() {
@@ -195,7 +200,14 @@ impl QuarantineLedger {
             }
             let bad = || format!("quarantine line {} is malformed", index + 1);
             let (hash_hex, reason_text) = line.split_once(' ').ok_or_else(bad)?;
-            if hash_hex.len() != 64 || !hash_hex.is_ascii() {
+            if hash_hex.len() != 64
+                || !hash_hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(bad());
+            }
+            if reason_text.is_empty() || !reason_text.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(bad());
             }
             let mut program_hash = [0u8; 32];
@@ -203,8 +215,16 @@ impl QuarantineLedger {
                 let digits = std::str::from_utf8(pair).map_err(|_| bad())?;
                 *slot = u8::from_str_radix(digits, 16).map_err(|_| bad())?;
             }
-            let reason_byte: u8 = reason_text.trim().parse().map_err(|_| bad())?;
+            let reason_byte: u8 = reason_text.parse().map_err(|_| bad())?;
             let reason = QuarantineReason::from_byte(reason_byte).ok_or_else(bad)?;
+            if ledger.entries.contains_key(&program_hash) {
+                return Err(format!("quarantine line {} duplicates a ban", index + 1));
+            }
+            if ledger.entries.len() >= MAX_QUARANTINE_ENTRIES {
+                return Err(format!(
+                    "quarantine ledger exceeds {MAX_QUARANTINE_ENTRIES} entries"
+                ));
+            }
             ledger.ban(program_hash, reason);
         }
         Ok(ledger)

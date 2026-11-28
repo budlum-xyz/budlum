@@ -51,8 +51,8 @@ pub fn reconcile(pins: &[[u8; 32]]) -> Reconciliation {
     counts.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
     let (top, top_count) = counts[0];
     let n = pins.len();
-    // Strict majority only: with four sources, 2-of-4 is not enough.
-    if top_count * 2 <= n {
+    // Strict majority only, and never elect an uninitialized all-zero digest.
+    if top == [0u8; 32] || top_count * 2 <= n {
         return Reconciliation::Split;
     }
     let torn: Vec<usize> = pins
