@@ -133,6 +133,10 @@ fn text<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 
 /// Read the payload. Every absent or malformed field is named in the error,
 /// because "the payload is wrong" without the field is not actionable.
+///
+/// # Errors
+///
+/// Returns the field that is missing or malformed, named, so the refusal is actionable.
 pub fn read_payload(payload: &str) -> Result<MergeRequest, String> {
     let root =
         json::parse(payload).map_err(|e| format!("{CONTEXT}: event payload is not JSON: {e}"))?;
@@ -203,6 +207,10 @@ pub fn read_payload(payload: &str) -> Result<MergeRequest, String> {
 /// The parser refuses a `#`-only file and an empty name rather than returning
 /// an empty list: an empty allowlist read as "no restriction" is exactly the
 /// absent-as-permission mistake the surrounding gates exist to stop.
+///
+/// # Errors
+///
+/// Returns the reason a line was refused; an empty list is never returned for an
 pub fn read_list(text: &str, path: &str) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     for raw in text.lines() {
@@ -341,6 +349,10 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 /// Deletions are excluded on purpose: a pull request that *removes* a planning
 /// document is doing the right thing, and failing it would make the rule
 /// impossible to satisfy.
+///
+/// # Errors
+///
+/// Returns the reason `git diff` could not be read; an unreadable diff is never
 pub fn changed_paths(root: &Path, req: &MergeRequest) -> Result<Vec<String>, String> {
     let out = git(
         root,
@@ -364,6 +376,10 @@ pub fn changed_paths(root: &Path, req: &MergeRequest) -> Result<Vec<String>, Str
 }
 
 /// Run the gate where it is meant to run: from the payload GitHub provides.
+///
+/// # Errors
+///
+/// Returns the reason the event payload could not be read or the merge was denied.
 pub fn run(root: &Path) -> Result<String, String> {
     let path = std::env::var(EVENT_ENV).map_err(|_| {
         format!(
@@ -403,6 +419,10 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// Canaries. Each one is a case the gate must get wrong in the direction that
 /// hurts: the first four name a merge that must be denied, the last two a merge
 /// that must not be.
+///
+/// # Errors
+///
+/// Returns the canary that did not behave as the gate promises.
 pub fn self_test() -> Result<String, String> {
     let branches = vec![String::from("testnet-50")];
     let forbidden = vec![
@@ -438,16 +458,16 @@ pub fn self_test() -> Result<String, String> {
     let mut fork = base.clone();
     fork.head_repo = Some(String::from("attacker/budlum"));
     if decide(&fork, &branches, &forbidden, &clean).allowed {
-        return Err(format!("canary: a fork pull request must be denied"));
+        return Err("canary: a fork pull request must be denied".to_string());
     }
 
     // 3. A missing head repository is denied, not skipped.
     let mut gone = base.clone();
     gone.head_repo = None;
     if decide(&gone, &branches, &forbidden, &clean).allowed {
-        return Err(format!(
-            "canary: a head repository that is gone must be denied, not skipped"
-        ));
+        return Err(
+            "canary: a head repository that is gone must be denied, not skipped".to_string(),
+        );
     }
 
     // 4. A forbidden path is denied, by prefix, by basename and by suffix.
@@ -481,21 +501,21 @@ pub fn self_test() -> Result<String, String> {
 
     // 6. The declared, same-repository, clean pull request is allowed.
     if !decide(&base, &branches, &forbidden, &clean).allowed {
-        return Err(format!(
-            "canary: the declarative path must be allowed, or the gate is a wall"
-        ));
+        return Err(
+            "canary: the declarative path must be allowed, or the gate is a wall".to_string(),
+        );
     }
 
     // 7. An empty claim file is a denial, not a permission.
     if read_list("# nothing here\n\n", BRANCHES_REL).is_ok() {
-        return Err(format!(
-            "canary: an empty claim file must be refused, not read as full permission"
-        ));
+        return Err(
+            "canary: an empty claim file must be refused, not read as full permission".to_string(),
+        );
     }
 
     // 8. A malformed payload is a denial, not a skip.
     if read_payload("{\"pull_request\":{}}").is_ok() {
-        return Err(format!("canary: an incomplete payload must not parse"));
+        return Err("canary: an incomplete payload must not parse".to_string());
     }
 
     let mut msg = String::new();
@@ -509,6 +529,10 @@ pub fn self_test() -> Result<String, String> {
 }
 
 /// Command line: `merge-gate [--self-test]`.
+///
+/// # Errors
+///
+/// Returns the gate's message, or the reason the merge is denied.
 pub fn cli(args: &[&str], root: &Path) -> Result<String, String> {
     match args {
         [] => run(root),
