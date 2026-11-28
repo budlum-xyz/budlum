@@ -728,3 +728,97 @@ mod tests {
         assert_eq!(resolved.finality, DomainFinalityStatus::Finalized);
     }
 }
+
+/// ZK fork-choice kolu: "kesinlik kanittan gelir" iddiasinin **olculmus** hali.
+///
+/// `ConsensusKind::Zk` kolu `CryptographicValidity` ile eslesir
+/// (`src/settlement/universal_finality.rs`), yani oy agirligi veya is kaniti
+/// degil, dogrulanmis bir kesinlik iddiasi secmeli. Asagidaki testler bu kolun
+/// boyle davrandigini iddia degil olcum olarak tutuyor: QC/kesinlik yoksa
+/// cozmez, ayni yukseklikte celisen iki "dogrulanmis" aday varsa cozmez ve
+/// buyuk `cumulative_work`/`vote_weight` bu kolu ikna etmez.
+#[cfg(test)]
+mod zk_fork_choice_gate_tests {
+    use super::*;
+
+    fn aday(domain_id: DomainId, height: u64, bayt: u8) -> ForkCandidate {
+        ForkCandidate {
+            domain_id,
+            head_hash: [bayt; 32],
+            parent_hash: [0x01; 32],
+            height,
+            cumulative_work: None,
+            vote_weight: None,
+            justified_checkpoint: None,
+            finalized_checkpoint: None,
+            proposer: None,
+            qc_present: false,
+            authority_quorum: false,
+        }
+    }
+
+    fn zk(domain_id: DomainId) -> DomainForkChoice {
+        DomainForkChoice {
+            domain_id,
+            kind: ConsensusKind::Zk,
+        }
+    }
+
+    #[test]
+    fn zk_kolu_dogrulanmis_kesinlik_iddiasi_olmadan_cozmez() {
+        // Hicbir adayda QC yok ve kesinlik noktasi yok: cozmemeli.
+        let sonuc = zk(9).fork_choice(&[aday(9, 10, 0x11), aday(9, 12, 0x22)]);
+        assert_eq!(sonuc, Err(ForkChoiceError::MissingQuorumCertificate));
+    }
+
+    #[test]
+    fn zk_kolu_qc_varken_kesinlik_noktasi_yoksa_yine_cozmez() {
+        // Yalniz `qc_present` yetmez: kesinlik noktasi da bagli olmali.
+        let mut qc_var = aday(9, 12, 0x22);
+        qc_var.qc_present = true;
+        assert_eq!(
+            zk(9).fork_choice(&[qc_var]),
+            Err(ForkChoiceError::MissingQuorumCertificate)
+        );
+    }
+
+    #[test]
+    fn zk_kolu_ayni_yukseklikte_cakisan_kesinligi_reddeder() {
+        let mut a = aday(9, 12, 0x22);
+        a.qc_present = true;
+        a.finalized_checkpoint = Some([0xBB; 32]);
+        let mut b = aday(9, 12, 0x33);
+        b.qc_present = true;
+        b.finalized_checkpoint = Some([0xCC; 32]);
+        assert_eq!(
+            zk(9).fork_choice(&[a, b]),
+            Err(ForkChoiceError::ConflictingFinality)
+        );
+    }
+
+    #[test]
+    fn zk_kolu_is_kaniti_ve_oy_agirligina_kanmaz() {
+        // Cok buyuk `cumulative_work`/`vote_weight` ama kesinlik iddiasi yok:
+        // ZK kolu PoW/PoS kurallarina dusmez, cozmez.
+        let mut agir = aday(9, 99, 0x44);
+        agir.cumulative_work = Some(u128::MAX);
+        agir.vote_weight = Some(u128::MAX);
+        assert_eq!(
+            zk(9).fork_choice(&[agir]),
+            Err(ForkChoiceError::MissingQuorumCertificate)
+        );
+
+        // Iki dogrulanmis aday arasinda secim yukseklige gore; oy agirligi
+        // dusuk olan yuksek olan kazanir.
+        let mut alcak = aday(9, 10, 0x55);
+        alcak.qc_present = true;
+        alcak.finalized_checkpoint = Some([0xBB; 32]);
+        alcak.vote_weight = Some(u128::MAX);
+        let mut yuksek = aday(9, 11, 0x66);
+        yuksek.qc_present = true;
+        yuksek.finalized_checkpoint = Some([0xBB; 32]);
+        let bas = zk(9).fork_choice(&[alcak, yuksek]).expect("cozulmeli");
+        assert_eq!(bas.height, 11);
+        assert_eq!(bas.reason, ForkChoiceReason::ZkVerifiedState);
+    }
+}
