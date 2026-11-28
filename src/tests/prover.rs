@@ -796,15 +796,49 @@ fn zk_domain_first_claim_must_match_genesis_state_root_and_reject_unanchored_adv
         .push(crate::prover::zk_program_hash(&program));
     domain.genesis_state_root[0] = 0x42;
 
-    // Upper 16 bytes of genesis_state_root must be zero for ZK domains.
-    let mut bad_domain = domain.clone();
-    bad_domain.id = 10;
-    bad_domain.genesis_state_root[16] = 1;
-    assert!(
-        crate::settlement::domains::validate_domain_registration(&bad_domain)
-            .unwrap_err()
-            .contains("upper 16 bytes")
-    );
+    // Full 32-byte genesis_state_root (non-zero upper 16 bytes) is accepted at
+    // registration, refuses unchained Horner-fold proofs, and advances via a
+    // 32-byte collision-resistant chained transition proof.
+    let (chained_prog, chained_hash) = crate::prover::build_chained_zk_transition_program();
+    let mut full_root_domain = domain.clone();
+    full_root_domain.id = 10;
+    full_root_domain.genesis_state_root[16] = 1;
+    full_root_domain.zk_program_allowlist.push(chained_hash);
+    crate::settlement::domains::validate_domain_registration(&full_root_domain)
+        .expect("full 32-byte genesis_state_root ZK domain is valid");
+    {
+        let mut bc_full = fresh_chain();
+        bc_full
+            .state
+            .settlement
+            .domains
+            .register(full_root_domain.clone())
+            .unwrap();
+        let prover_full = addr(0x31);
+        let fee_full = bc_full.state.registry.params().proof_submission_fee;
+        bc_full.state.add_balance(&prover_full, fee_full * 4);
+        let full_unchained = bc_full
+            .submit_zk_proof(submission(prover_full, 10, 1, &proof, &pi, &program))
+            .unwrap_err();
+        assert!(full_unchained.contains("starts from"), "{full_unchained}");
+        let (ch_proof, ch_pi) = crate::prover::prove_chained_zk_transition(
+            &chained_prog,
+            &full_root_domain.genesis_state_root,
+            1,
+            bc_full.chain_id,
+        )
+        .expect("prove chained transition from full 32-byte genesis root");
+        bc_full
+            .submit_zk_proof(submission(
+                prover_full,
+                10,
+                1,
+                &ch_proof,
+                &ch_pi,
+                &chained_prog,
+            ))
+            .expect("chained transition advances full 32-byte genesis root domain");
+    }
 
     bc.state.settlement.domains.register(domain).unwrap();
     let prover = addr(0x31);
@@ -975,5 +1009,179 @@ fn proof_market_zk_idempotent_claim_refunds_creator_without_paying_prover() {
     assert_eq!(
         bc.state.get_balance(&second_prover),
         prover_bal_before - fee
+    );
+
+    zk_domain_advances_1000_consecutive_32b_chained_transitions_and_rejects_prover_chosen_roots();
+}
+
+fn zk_domain_advances_1000_consecutive_32b_chained_transitions_and_rejects_prover_chosen_roots() {
+    use bud_proof::adapter::ProverAdapter;
+    use bud_proof::plonky3_prover::Plonky3Adapter;
+    use rayon::prelude::*;
+
+    let (program, prog_hash) = crate::prover::build_chained_zk_transition_program();
+    let mut bc = fresh_chain();
+    let prover = addr(0x71);
+    let fee = bc.state.registry.params().proof_submission_fee;
+    bc.state.add_balance(&prover, fee * 1_020);
+
+    // Register ZK domain 9 with a full 32-byte non-zero genesis_state_root
+    // (including non-zero upper 16 bytes) via the canonical registration validator.
+    let genesis_root = [0xA5u8; 32];
+    let mut dom = crate::domain::plugin::default_domain(
+        9,
+        crate::domain::ConsensusKind::Zk,
+        9009,
+        "zk-proof-verification",
+        0,
+    );
+    dom.zk_program_allowlist = vec![prog_hash];
+    dom.genesis_state_root = genesis_root;
+    crate::settlement::domains::register_domain(&mut bc.state, dom)
+        .expect("full 32-byte genesis_state_root ZK domain registers cleanly");
+
+    // Adversarial check 1: prover-chosen starting root at height 1 must be refused.
+    let wrong_start = [0xFFu8; 32];
+    let (bad_proof_1, bad_pi_1) =
+        crate::prover::prove_chained_zk_transition(&program, &wrong_start, 1, bc.chain_id)
+            .expect("prove from wrong root");
+    let err_genesis = bc
+        .submit_zk_proof(submission(prover, 9, 1, &bad_proof_1, &bad_pi_1, &program))
+        .expect_err("prover-chosen initial root at height 1 must be rejected");
+    assert!(err_genesis.contains("starts from state"), "{err_genesis}");
+    assert_eq!(
+        bc.state
+            .settlement
+            .domains
+            .get(9)
+            .expect("domain 9")
+            .last_committed_height,
+        0
+    );
+
+    // Build the deterministic 1,000-step sequential chain (0 -> 1 -> ... -> 1_000)
+    // where each transition starts from the prior transition's 32-byte final_state_root,
+    // generate all 1,000 real Plonky3 STARK proofs, and submit them in strict order.
+    let mut staged = Vec::with_capacity(1_000);
+    let mut current_root = genesis_root;
+    for h in 1..=1_000u64 {
+        let (trace, pi) =
+            crate::prover::prepare_chained_zk_trace(&program, &current_root, h, bc.chain_id)
+                .expect("prepare chained ZK trace");
+        assert_ne!(pi.final_state_root, [0u8; 32]);
+        assert_ne!(pi.final_state_root, current_root);
+        current_root = pi.final_state_root;
+        staged.push((h, trace, pi));
+    }
+
+    let proven: Vec<(u64, ProofEnvelope, ExecutionPublicInputs)> = staged
+        .into_par_iter()
+        .map(|(h, trace, pi)| {
+            let env = Plonky3Adapter::prove(&trace, &pi, &program)
+                .expect("prove real Plonky3 STARK transition");
+            (h, env, pi)
+        })
+        .collect();
+
+    let mut root_at_500 = [0u8; 32];
+    let mut sub_at_1000 = None;
+    for (h, proof, pi) in proven {
+        let sub = submission(prover, 9, h, &proof, &pi, &program);
+        let outcome = bc
+            .submit_zk_proof(sub.clone())
+            .expect("consecutive chained ZK transition succeeds");
+        assert!(matches!(
+            outcome,
+            crate::prover::ProofAcceptance::Accepted { .. }
+        ));
+        if h == 500 {
+            root_at_500 = pi.final_state_root;
+        }
+        if h == 1_000 {
+            sub_at_1000 = Some(sub);
+        }
+    }
+
+    let dom_after = bc.state.settlement.domains.get(9).expect("domain 9");
+    assert_eq!(dom_after.last_committed_height, 1_000);
+    assert_eq!(dom_after.last_committed_hash, current_root);
+
+    // Tip idempotent resubmission at height 1_000 classifies as Idempotent.
+    let idem_out = bc
+        .submit_zk_proof(sub_at_1000.expect("saved height-1000 submission"))
+        .expect("idempotent replay of chained height 1000 succeeds");
+    assert_eq!(idem_out, crate::prover::ProofAcceptance::Idempotent);
+
+    // Adversarial check 2: prover-chosen stale/arbitrary root at height 1_001 is rejected.
+    let (stale_proof, stale_pi) =
+        crate::prover::prove_chained_zk_transition(&program, &root_at_500, 1_001, bc.chain_id)
+            .expect("prove from stale root_at_500");
+    let err_stale = bc
+        .submit_zk_proof(submission(
+            prover,
+            9,
+            1_001,
+            &stale_proof,
+            &stale_pi,
+            &program,
+        ))
+        .expect_err("prover-chosen stale starting root at height 1001 must be rejected");
+    assert!(
+        err_stale.contains("no derivable initial root"),
+        "{err_stale}"
+    );
+
+    // Adversarial check 3: unchained fold-only program (even if allowlisted) is still
+    // refused above height 1 because it carries no 32-byte parent root commitment.
+    let unchained_bytes: Vec<u8> = [
+        Instruction {
+            opcode: Opcode::Load,
+            rd: 1,
+            rs1: 0,
+            rs2: 0,
+            imm: 9,
+        }
+        .encode(),
+        Instruction {
+            opcode: Opcode::SWrite,
+            rd: 0,
+            rs1: 1,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode(),
+        Instruction {
+            opcode: Opcode::Halt,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm: 0,
+        }
+        .encode(),
+    ]
+    .into_iter()
+    .flat_map(u64::to_le_bytes)
+    .collect();
+    let (unc_proof, unc_pi, unc_prog) =
+        prove_bytecode(&unchained_bytes, DEFAULT_CONTRACT_GAS_LIMIT).expect("prove unchained");
+    bc.state
+        .settlement
+        .domains
+        .get_mut(9)
+        .expect("domain 9")
+        .zk_program_allowlist
+        .push(crate::prover::zk_program_hash(&unc_prog));
+    let err_unc = bc
+        .submit_zk_proof(submission(prover, 9, 1_001, &unc_proof, &unc_pi, &unc_prog))
+        .expect_err("unchained fold-only proof must be refused at height 1001");
+    assert!(err_unc.contains("no derivable initial root"), "{err_unc}");
+    assert_eq!(
+        bc.state
+            .settlement
+            .domains
+            .get(9)
+            .expect("domain 9")
+            .last_committed_height,
+        1_000
     );
 }

@@ -462,6 +462,119 @@ pub enum ClaimDecision {
 }
 
 #[cfg(test)]
+pub(crate) fn build_chained_zk_transition_program() -> (Vec<u64>, Hash32) {
+    use bud_isa::{Instruction, Opcode};
+
+    let inst = |opcode: Opcode, rd: u8, rs1: u8, rs2: u8, imm: i32| -> u64 {
+        Instruction {
+            opcode,
+            rd,
+            rs1,
+            rs2,
+            imm,
+        }
+        .encode()
+    };
+
+    let mut prog = vec![
+        inst(Opcode::Load, 30, 0, 0, 0),
+        inst(Opcode::Load, 6, 0, 0, 1 << 16),
+        inst(Opcode::Mul, 6, 6, 6, 0),
+        inst(Opcode::Load, 5, 30, 0, 64),
+        inst(Opcode::Neq, 4, 5, 0, 0),
+        inst(Opcode::Assert, 0, 4, 0, 0),
+        inst(Opcode::Add, 8, 5, 0, 0),
+    ];
+    for i in 0..8i32 {
+        prog.push(inst(Opcode::Load, 1, 30, 0, i * 8));
+        prog.push(inst(Opcode::Lt, 3, 1, 6, 0));
+        prog.push(inst(Opcode::Assert, 0, 3, 0, 0));
+        prog.push(inst(Opcode::Poseidon, 8, 8, 1, 0));
+        prog.push(inst(Opcode::SWrite, 0, 1, 0, i));
+    }
+    prog.push(inst(Opcode::Log, 0, 8, 0, 0));
+    prog.push(inst(Opcode::SWrite, 0, 8, 0, 8));
+    prog.push(inst(Opcode::Halt, 0, 0, 0, 0));
+
+    let hash = zk_program_hash(&prog);
+    (prog, hash)
+}
+
+#[cfg(test)]
+pub(crate) fn prepare_chained_zk_trace(
+    program_words: &[u64],
+    prev_state_root: &Hash32,
+    step_witness: u64,
+    chain_id: u64,
+) -> Result<(Vec<bud_vm::Step>, ExecutionPublicInputs), String> {
+    use bud_proof::adapter::{
+        initial_state_root_of, memory_image_commitment_of_reads, register_image_commitment_of_reads,
+    };
+    use bud_proof::event_digest_from_events;
+    use bud_proof::plonky3_prover::{initial_memory_reads, initial_register_reads};
+    use bud_vm::Vm;
+
+    let mut vm = Vm::new(256);
+    for (idx, chunk) in prev_state_root.as_chunks::<4>().0.iter().enumerate() {
+        let limb = u32::from_le_bytes(*chunk);
+        let off = idx * 8;
+        if let Some(dst) = vm.memory.get_mut(off..off + 8) {
+            dst.copy_from_slice(&u64::from(limb).to_le_bytes());
+        }
+    }
+    if let Some(dst) = vm.memory.get_mut(64..72) {
+        dst.copy_from_slice(&step_witness.to_le_bytes());
+    }
+
+    let receipt = vm.run_receipt(program_words);
+    if !receipt.success || receipt.exit_code != 0 {
+        return Err(format!(
+            "chained ZK VM execution failed: exit={} err={:?}",
+            receipt.exit_code, receipt.error
+        ));
+    }
+
+    let init_mem = memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace));
+    let init_reg = register_image_commitment_of_reads(&initial_register_reads(&vm.trace));
+    let initial_state_root = initial_state_root_of(init_mem, init_reg);
+    let event_digest = event_digest_from_events(&receipt.events);
+
+    let public_inputs = ExecutionPublicInputs {
+        chain_id,
+        program_hash: zk_program_hash(program_words),
+        initial_state_root,
+        final_state_root: receipt.state_writes_digest,
+        sender: 0,
+        nonce: 0,
+        block_height: 0,
+        gas_limit: vm.gas_limit,
+        gas_used: receipt.gas_used,
+        exit_code: receipt.exit_code,
+        trace_len: receipt.trace_len,
+        event_digest,
+        state_writes_digest: receipt.state_writes_digest,
+    };
+    Ok((vm.trace, public_inputs))
+}
+
+#[cfg(test)]
+pub(crate) fn prove_chained_zk_transition(
+    program_words: &[u64],
+    prev_state_root: &Hash32,
+    step_witness: u64,
+    chain_id: u64,
+) -> Result<(ProofEnvelope, ExecutionPublicInputs), String> {
+    use bud_proof::adapter::ProverAdapter;
+    use bud_proof::plonky3_prover::Plonky3Adapter;
+
+    let (trace, public_inputs) =
+        prepare_chained_zk_trace(program_words, prev_state_root, step_witness, chain_id)?;
+    let envelope = Plonky3Adapter::prove(&trace, &public_inputs, program_words)
+        .map_err(|e| format!("chained ZK STARK prove failed: {e:?}"))?;
+    Ok((envelope, public_inputs))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

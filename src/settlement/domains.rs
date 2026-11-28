@@ -376,14 +376,6 @@ pub fn validate_domain_registration(domain: &ConsensusDomain) -> Result<(), Stri
             domain.id
         ));
     }
-    if matches!(domain.kind, ConsensusKind::Zk)
-        && domain.genesis_state_root.get(16..32) != Some([0u8; 16].as_slice())
-    {
-        return Err(format!(
-            "Zk domain {} genesis_state_root upper 16 bytes must be zero",
-            domain.id
-        ));
-    }
 
     Ok(())
 }
@@ -1557,24 +1549,95 @@ pub fn submit_zk_proof(
                 .to_string(),
         );
     }
-    // The proof has to start where the domain is, and that only means
-    // something if `initial_state_root` is anchored to registered state rather
-    // than a prover-chosen Horner fold at fixed constants. Re-executing the
-    // committed tip height may only repeat `last_committed_hash` idempotently.
-    if claim_height > domain.last_committed_height {
-        let expected = crate::domain::expected_initial_root(domain, &submission.program)
-            .ok_or_else(|| {
-                format!(
-                    "zk proof for domain {claimed_domain}: no derivable initial root - a \
-                     fold-consistent prover value is not evidence of the starting state"
-                )
-            })?;
-        if pi.initial_state_root != expected {
-            return Err(format!(
-                "zk proof starts from state {} but domain {claimed_domain} starts from {}",
-                hex::encode(pi.initial_state_root),
-                hex::encode(expected)
-            ));
+    fn chained_zk_writes_digest(prev_root: &Hash32, batch_digest: u64) -> Hash32 {
+        use bud_vm::{poseidon_full_state, POSEIDON_WIDTH};
+        let mut acc = [0u64; 4];
+        for (slot, chunk) in prev_root.as_chunks::<4>().0.iter().enumerate() {
+            let limb = u32::from_le_bytes(*chunk);
+            let mut st = [0u64; POSEIDON_WIDTH];
+            if let Some(s0) = st.get_mut(0) {
+                *s0 = u64::try_from(slot).unwrap_or(0);
+            }
+            if let Some(s1) = st.get_mut(1) {
+                *s1 = u64::from(limb);
+            }
+            for (dst, src) in st.iter_mut().skip(2).zip(acc.iter()) {
+                *dst = *src;
+            }
+            let out = poseidon_full_state(st);
+            for (dst, src) in acc.iter_mut().zip(out.iter()) {
+                *dst = *src;
+            }
+        }
+        let mut st = [0u64; POSEIDON_WIDTH];
+        if let Some(s0) = st.get_mut(0) {
+            *s0 = 8;
+        }
+        if let Some(s1) = st.get_mut(1) {
+            *s1 = batch_digest;
+        }
+        for (dst, src) in st.iter_mut().skip(2).zip(acc.iter()) {
+            *dst = *src;
+        }
+        let out = poseidon_full_state(st);
+        for (dst, src) in acc.iter_mut().zip(out.iter()) {
+            *dst = *src;
+        }
+        let mut res = [0u8; 32];
+        for (chunk, lane) in res.as_chunks_mut::<8>().0.iter_mut().zip(acc.iter()) {
+            chunk.copy_from_slice(&lane.to_le_bytes());
+        }
+        res
+    }
+    let parent_state_root = if claim_height > domain.last_committed_height {
+        if domain.last_committed_height == 0 && domain.last_committed_hash == [0u8; 32] {
+            domain.genesis_state_root
+        } else {
+            domain.last_committed_hash
+        }
+    } else if claim_height <= 1 {
+        domain.genesis_state_root
+    } else if let Some(prev_claim) = state.settlement.proof_claims.get(&ProofClaimKey {
+        domain_id: claimed_domain,
+        target_height: claim_height - 1,
+    }) {
+        prev_claim.final_state_root
+    } else {
+        domain.genesis_state_root
+    };
+    let is_chained_transition = pi.final_state_root != [0u8; 32]
+        && pi.event_digest.get(8..32) == Some([0u8; 24].as_slice())
+        && pi
+            .event_digest
+            .get(0..8)
+            .and_then(|s| <[u8; 8]>::try_from(s).ok())
+            .map(u64::from_le_bytes)
+            .is_some_and(|batch_digest| {
+                batch_digest != 0
+                    && pi.state_writes_digest
+                        == chained_zk_writes_digest(&parent_state_root, batch_digest)
+            });
+
+    if !is_chained_transition {
+        // Unchained legacy genesis proofs only carry the 16-byte Horner fold in
+        // `initial_state_root`, so they may only advance height 0 when the
+        // domain's `genesis_state_root` matches; subsequent heights require a
+        // 32-byte collision-resistant chained transition commitment.
+        if claim_height > domain.last_committed_height {
+            let expected = crate::domain::expected_initial_root(domain, &submission.program)
+                .ok_or_else(|| {
+                    format!(
+                        "zk proof for domain {claimed_domain}: no derivable initial root - a \
+                         fold-consistent prover value is not evidence of the starting state"
+                    )
+                })?;
+            if pi.initial_state_root != expected {
+                return Err(format!(
+                    "zk proof starts from state {} but domain {claimed_domain} starts from {}",
+                    hex::encode(pi.initial_state_root),
+                    hex::encode(expected)
+                ));
+            }
         }
     }
     // Bounded advance. An accepted claim parks the tip and nothing lowers it,
